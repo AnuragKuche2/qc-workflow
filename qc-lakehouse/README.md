@@ -90,3 +90,26 @@ make smoke-all
 
 Real data generation, dbt medallion models, Airflow/Docker orchestration, and the AI/RAG
 layer are separate sub-projects (B-H) - see the design spec.
+
+## Reference data generator (Sub-project B spine)
+
+Ported from a Databricks notebook (see
+`docs/superpowers/specs/2026-09-14-qc-lakehouse-databricks-hero-design.md`, section 6).
+Generates the quick-commerce world's starting state - cities, zones, restaurants, riders,
+menu items, customers, payout tiers, and a 90-day demand curve - and writes it directly to
+Delta tables in `qc_dev.bronze_source` (not `workspace.dev`, which stays reserved for
+Sub-project A's own throwaway smoke-test tables).
+
+```bash
+make generate-reference-data
+```
+
+This does not use Auto Loader - reference/dimension data is a one-time seed of the
+starting world, not a stream of arriving files, so Auto Loader's incremental-ingestion
+value doesn't apply here. Auto Loader is introduced in a later widen phase, for the
+fact tables (orders, order_events, courier_shifts, gps_pings) this generator does not
+produce.
+
+Idempotent: every write is `mode("overwrite")` from a fixed seed
+(`GeneratorConfig.seed`), so rerunning reproduces the same data rather than
+accumulating duplicates.

@@ -1,4 +1,4 @@
-.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all
+.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all generate-reference-data
 
 venv:
 	uv python pin 3.12
@@ -50,3 +50,9 @@ smoke-dbt:
 	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt run --project-dir dbt/qc_lakehouse --select hello_dbt
 
 smoke-all: smoke-local smoke-databricks smoke-dbt
+
+# Writes real reference data to qc_dev.bronze_source on live Databricks - not a throwaway
+# smoke test like smoke-databricks. Uses .venv-databricks (same as smoke-databricks)
+# because it needs databricks-connect for the serverless session.
+generate-reference-data:
+	.venv-databricks/bin/python scripts/generate_reference_data.py
