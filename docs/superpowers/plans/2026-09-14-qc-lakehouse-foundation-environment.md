@@ -834,12 +834,16 @@ qc_lakehouse:
       schema: "{{ env_var('DATABRICKS_SCHEMA') }}"
       host: "{{ env_var('DATABRICKS_HOST') }}"
       http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
-      auth_type: databricks-cli
+      auth_type: oauth
       threads: 4
 ```
 
-`auth_type: databricks-cli` reuses the OAuth login from Task 6 Step 1 - no token lives in this
-file or in `.env`.
+`auth_type: oauth` triggers dbt-databricks's own OAuth U2M flow (browser-based, one-time) - no
+token lives in this file or in `.env`. Note this is a *separate* token cache from the
+Databricks CLI's own login (Task 6 Step 1) - `databricks-cli` is not a valid `auth_type` value
+for this adapter and was corrected during implementation after `dbt debug` rejected it
+outright. The two OAuth sessions (CLI, dbt) are independent; each needs its own one-time
+browser login, but both then persist across future runs.
 
 - [ ] **Step 4: Write `qc-lakehouse/dbt/qc_lakehouse/models/example/hello_dbt.sql`**
 
@@ -864,11 +868,11 @@ def test_dbt_project_yml_is_valid_and_named_correctly():
     assert content["profile"] == "qc_lakehouse"
 
 
-def test_profiles_yml_targets_databricks_cli_auth():
+def test_profiles_yml_targets_oauth_auth():
     content = yaml.safe_load((DBT_PROJECT_DIR / "profiles.yml").read_text())
     dev_output = content["qc_lakehouse"]["outputs"]["dev"]
     assert dev_output["type"] == "databricks"
-    assert dev_output["auth_type"] == "databricks-cli"
+    assert dev_output["auth_type"] == "oauth"
 ```
 
 These files already exist from Steps 2-4, so this step is "add tests that lock in the
