@@ -1,6 +1,7 @@
 from qc_lakehouse.generator.config import GeneratorConfig
 from qc_lakehouse.generator.entities import (
     build_cities,
+    build_demand_curve,
     build_menu_items,
     build_payout_tiers,
     build_restaurants,
@@ -123,3 +124,33 @@ def test_build_payout_tiers_covers_bronze_silver_gold():
     tiers = build_payout_tiers(GeneratorConfig())
     assert {t[0] for t in tiers} == {"bronze", "silver", "gold"}
     assert all(t[2] is None for t in tiers)    # valid_to is open-ended
+
+
+def test_build_demand_curve_produces_one_daily_row_per_day():
+    config = GeneratorConfig(days=14)
+    daily, hourly = build_demand_curve(config)
+    assert len(daily) == 14
+    assert len(hourly) == 14 * 24
+
+
+def test_build_demand_curve_hourly_rows_sum_back_to_daily_orders():
+    config = GeneratorConfig(days=14)
+    daily, hourly = build_demand_curve(config)
+    for day in daily:
+        day_index, orders = day[0], day[7]
+        hours_for_day = sum(h[3] for h in hourly if h[0] == day_index)
+        assert hours_for_day == orders
+
+
+def test_build_demand_curve_is_deterministic_for_the_same_seed():
+    a_daily, a_hourly = build_demand_curve(GeneratorConfig(days=14, seed=5))
+    b_daily, b_hourly = build_demand_curve(GeneratorConfig(days=14, seed=5))
+    assert a_daily == b_daily
+    assert a_hourly == b_hourly
+
+
+def test_build_demand_curve_event_day_names_are_recorded():
+    config = GeneratorConfig(days=90)
+    daily, _hourly = build_demand_curve(config)
+    event_days = [d for d in daily if d[8] is not None]
+    assert len(event_days) >= 1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 import random
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -10,8 +11,15 @@ from qc_lakehouse.generator.config import (
     BRAND_PREFIX,
     CITIES,
     CUISINES,
+    DOW_RAW,
+    EVENTS,
     HISTORY_DAYS,
+    HOURLY_WEEKDAY_RAW,
+    HOURLY_WEEKEND_RAW,
     MENUS,
+    NOISE_SIGMA,
+    SHOULDER_AFTER,
+    SHOULDER_BEFORE,
     TIER_MIX,
     TIER_RATES,
     VEHICLE_MIX,
@@ -19,7 +27,10 @@ from qc_lakehouse.generator.config import (
     GeneratorConfig,
 )
 from qc_lakehouse.generator.math_utils import (
+    day_factors,
+    orders_by_hour,
     pick,
+    resolve_events,
     sample_around,
     spiral_point,
     split_by_share,
@@ -177,3 +188,36 @@ def build_payout_tiers(config: GeneratorConfig) -> list[tuple]:
         (t[0], tier_from, None, Decimal(t[1]), Decimal(t[2]), Decimal(t[3]))
         for t in TIER_RATES
     ]
+
+
+def build_demand_curve(config: GeneratorConfig) -> tuple[list[tuple], list[tuple]]:
+    start_date = date.fromisoformat(config.start_date)
+    # Normalized so the mean is exactly 1.0, otherwise orders_per_day would not mean what
+    # it says.
+    dow = [m / (sum(DOW_RAW) / 7) for m in DOW_RAW]
+    hourly_weekday = [w / sum(HOURLY_WEEKDAY_RAW) for w in HOURLY_WEEKDAY_RAW]
+    hourly_weekend = [w / sum(HOURLY_WEEKEND_RAW) for w in HOURLY_WEEKEND_RAW]
+    resolved = resolve_events(EVENTS, config.days)
+
+    # Noise gets its own RNG stream so adding events or trends cannot shift it.
+    nrng = random.Random(stream_seed(config.seed, "noise"))
+    noise = [math.exp(nrng.gauss(0.0, NOISE_SIGMA)) for _ in range(config.days)]
+
+    daily = []
+    for d in range(config.days):
+        dt, weekday, dowv, event, n, total, orders, names = day_factors(
+            d, start_date, dow, resolved, noise, config.orders_per_day,
+            SHOULDER_BEFORE, SHOULDER_AFTER,
+        )
+        daily.append((d, dt, weekday, float(dowv), float(event), float(n), float(total),
+                      orders, ",".join(names) or None))
+
+    hourly = [
+        (d, start_date + timedelta(days=d), hour, n)
+        for d in range(config.days)
+        for hour, n in enumerate(orders_by_hour(
+            d, start_date, dow, resolved, noise, config.orders_per_day,
+            hourly_weekday, hourly_weekend, SHOULDER_BEFORE, SHOULDER_AFTER,
+        ))
+    ]
+    return daily, hourly
