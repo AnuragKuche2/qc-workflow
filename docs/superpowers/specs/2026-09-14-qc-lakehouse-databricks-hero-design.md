@@ -1,6 +1,6 @@
 # QC Lakehouse (Databricks-Hero) - Design
 
-**Status:** Approved for sub-project A (built and merged). Sub-project B's spine (reference-data layer only) is designed in section 6, pending review. Sub-projects C-H are decomposed below but not yet individually designed. Build order is fixed: A -> B -> C -> E -> H -> D -> G -> F (see section 4).
+**Status:** Sub-project A built and merged. Sub-project B's spine (reference-data layer, section 6) built and merged. Widen step W1a (money-chain fact tables, section 6.6) is designed, pending review. W1b (order_events/courier_shifts/gps_pings + Auto Loader/streaming) not yet designed. Sub-projects C-H are decomposed below but not yet individually designed. Build order is fixed: A -> B -> C -> E -> H -> D -> G -> F (see section 4).
 
 ## 1. Background
 
@@ -298,6 +298,160 @@ end to end - matching the project's thin-spine-then-widen philosophy.
   deliberately breaks an invariant and confirms the run fails.
 - `make check` gains real, fast, Spark-free unit test coverage for every pure function in
   `math_utils.py`.
+
+## 6.6 Sub-project B, widen step W1a: money-chain fact tables - detailed design
+
+### 6.6.1 Background
+
+Sub-project B's spine (section 6) built and live-verified the reference/dimension layer only
+(`cities`, `zones`, `restaurants`, `riders`, `menu_items`, `customers`, `rider_payout_tiers`,
+`demand_daily`, `demand_hourly`, plus the two `_gen_*` generator-only profile tables) in
+`qc_dev.bronze_source`. This section widens B with the first fact-table slice: the
+**commercial transaction layer** - `orders`, `order_items`, `match_attempts`, `payments`,
+`refunds` - without yet modeling physical fulfillment (courier assignment timing, GPS,
+delivery-event lifecycle). That's W1b, a separate future design pass.
+
+An older superseded planning pass (`QC-datapipelineplan.md`) contains a real, if partial,
+defect catalog and domain ideas for this layer - notably defect **#18** (money stored as text,
+with accounting-style negatives in parens, e.g. `"(20.47)"`, which breaks a naive `CAST` under
+ANSI mode) and defect **#17** (text casing/whitespace noise on free-text fields). Both are
+adopted here, adapted to this project's own table shapes (the old plan's own field lists for
+these tables were themselves incomplete - it references an external generator source that
+isn't part of this repo - so the schemas below are designed fresh, not ported).
+
+### 6.6.2 Scope decisions
+
+- **Five tables only**: `orders`, `order_items`, `match_attempts`, `payments`, `refunds`.
+  `order_events`, `courier_shifts`, `gps_pings` are W1b (separate design pass) - that's where
+  Auto Loader and streaming are introduced, once there's a genuinely high-volume,
+  genuinely-benefits-from-incremental-ingestion table to justify them.
+- **No Auto Loader here either.** Same reasoning as the spine: this is still a from-scratch
+  generation run, not a stream of arriving files. Direct-write to Delta.
+- **Order volume comes from the already-built demand curve, not a new count.** For every
+  `(day, hour, order_count)` row in `demand_hourly`, generate exactly that many orders with
+  `placed_at` timestamps jittered within that hour. This is literally what `demand_hourly`
+  exists for (the source notebook's own comment: "Does NOT generate orders; notebook 02 reads
+  these tables").
+- **Restaurant and customer selection reuse the generator-only profile tables**: restaurant
+  chosen per order weighted by `_gen_restaurant_profile.popularity_weight` (Zipf), customer
+  chosen weighted by `_gen_customer_profile.order_propensity` (lognormal). This is the payoff
+  for keeping those tables separate from the source-visible ones in the spine.
+- **Reads reference tables back from Delta, not in-process Python objects.** This is a
+  separate script run from the spine's generator - `spark.table("qc_dev.bronze_source.zones")`
+  etc., not passing `zones: list[tuple]` across a process boundary. The spine's `writer.py`
+  keeps building everything in one in-memory pass; this widen step is architecturally a
+  different, later run.
+- **Deliberate defects, isolated in their own module** (`defects.py`), so they're
+  independently unit-testable and their probability is controlled by explicit
+  `GeneratorConfig` fields, not hardcoded:
+  - `refunds.refund_amount_raw`: stored as a `STRING`, not `DECIMAL` - a
+    `money_text_defect_rate` fraction of rows use accounting-negative-in-parens format
+    (`"(12.50)"`), the rest are plain (`"12.50"`). Placed on `refunds` specifically because a
+    refund is naturally a credit/negative-flavored amount - realistic, not arbitrary.
+  - `orders.delivery_notes`: a free-text field; a `text_noise_defect_rate` fraction of rows get
+    random casing/whitespace mangling (upper/lower/leading-space/trailing-space).
+- **Idempotent by the same pattern as the spine**: full-table `mode("overwrite")` regeneration
+  from a fixed seed - not incremental MERGE. Same justification as spine section 6.2's writer:
+  deterministic regeneration from a fixed seed is safe to retry, unlike an accumulating append.
+- **Same real assert-based integrity checks as the spine**, extended for this layer (see 6.6.4)
+  - continuing the "assert, not print, and run before any write" discipline.
+
+### 6.6.3 Table shapes
+
+All five tables land in `qc_dev.bronze_source`, same catalog/schema as the spine.
+
+**`orders`** (one row per generated order):
+`order_id` (long, PK), `order_ref` (string, e.g. `"O-0000001"`), `customer_id` (long, FK
+customers), `restaurant_id` (long, FK restaurants), `zone_id` (long, FK zones - the customer's
+delivery zone), `placed_at` (timestamp), `order_status` (string: `DELIVERED` / `CANCELLED` /
+`UNFULFILLED`), `subtotal` (`DECIMAL(18,2)` - sum of `order_items.line_total`),
+`delivery_fee` (`DECIMAL(18,2)` - snapshotted from `zones.base_delivery_fee` at order time),
+`commission_pct` (`DECIMAL(5,4)` - snapshotted from `restaurants.commission_pct`),
+`commission_amount` (`DECIMAL(18,2)` - `subtotal * commission_pct`, quantized once),
+`order_total` (`DECIMAL(18,2)` - `subtotal + delivery_fee`, clean, no defect),
+`delivery_notes` (string, nullable - the text-noise-defect field).
+
+**`order_items`** (one row per line item, `menu_items_per_order` roughly 1-4, weighted toward
+1-2): `order_item_id` (long, PK), `order_id` (long, FK), `menu_item_id` (long, FK menu_items),
+`quantity` (int), `unit_price` (`DECIMAL(18,2)` - snapshotted from `menu_items.price` at order
+time, since menu prices drift over the generation window), `line_total` (`DECIMAL(18,2)` -
+`quantity * unit_price`, quantized once).
+
+**`match_attempts`** (one or more rows per order - the courier-offer process; UNFULFILLED
+orders have zero `ACCEPTED` rows, DELIVERED/CANCELLED orders have exactly one):
+`match_id` (long, PK), `order_id` (long, FK), `rider_id` (long, FK riders - the candidate
+offered), `attempt_number` (int, 1-based), `offered_at` (timestamp), `response` (string:
+`ACCEPTED` / `DECLINED` / `TIMEOUT`), `responded_at` (timestamp).
+
+**`payments`** (one row per order that reaches a payable state - i.e. not `UNFULFILLED`):
+`payment_id` (long, PK), `order_id` (long, FK), `amount` (`DECIMAL(18,2)` - equals
+`orders.order_total` for `SUCCESS` rows), `method` (string: `card` / `upi` / `wallet` / `cod`),
+`status` (string: `SUCCESS` / `FAILED`, a small `payment_failure_rate` fraction), `paid_at`
+(timestamp).
+
+**`refunds`** (one row for every `CANCELLED` order, plus a `refund_rate` fraction of
+`DELIVERED` orders - quality-issue refunds): `refund_id` (long, PK), `order_id` (long, FK),
+`payment_id` (long, FK), `refund_amount_raw` (STRING - the money-text-defect field), `reason`
+(string: `CANCELLED` / `QUALITY_ISSUE` / `LATE_DELIVERY` / `MISSING_ITEMS`), `refunded_at`
+(timestamp).
+
+### 6.6.4 New `GeneratorConfig` fields and integrity checks
+
+`GeneratorConfig` (already defined in the spine, section 6.3) gains: `cancel_rate: float =
+0.06`, `unfulfilled_rate: float = 0.025`, `refund_rate: float = 0.028` (fraction of
+`DELIVERED` orders that also get a quality-issue refund), `payment_failure_rate: float =
+0.01`, `money_text_defect_rate: float = 0.15`, `text_noise_defect_rate: float = 0.08`.
+
+New real (assert-based, pre-write) checks, continuing the spine's pattern: order counts per
+`(day, hour)` must exactly match `demand_hourly`; every `order_item`/`match_attempt`/
+`payment`/`refund` must reference a real `order_id` (and `menu_item_id`/`rider_id`/
+`payment_id` respectively); every matched order (`DELIVERED`/`CANCELLED`) has exactly one
+`ACCEPTED` `match_attempt`, every `UNFULFILLED` order has zero; `orders.subtotal` equals the
+sum of its `order_items.line_total`; every `SUCCESS` payment's `amount` equals its order's
+`order_total`.
+
+### 6.6.5 File structure
+
+```
+qc_lakehouse/generator/
+  defects.py         # pure functions: format_money_with_accounting_negative(amount, rng) -> str,
+                      # mangle_text_casing_and_whitespace(text, rng) -> str - no rate logic here,
+                      # callers decide whether to apply based on GeneratorConfig's rate fields
+  fact_entities.py     # build_orders, build_order_items, build_match_attempts, build_payments,
+                        # build_refunds - reads demand_hourly + reference tables back from
+                        # Delta (spark.table(...)), builds the money chain in memory
+  fact_writer.py         # write_fact_tables(spark, config) -> dict[str, int]: runs the 6.6.4
+                          # integrity checks before any write, then writes all five tables -
+                          # sibling to the spine's writer.py, not an addition to it
+
+qc-lakehouse/scripts/generate_fact_data.py   # entrypoint: load_settings() + build_databricks_session()
+                                               # + GeneratorConfig() + call the fact writer,
+                                               # mirrors generate_reference_data.py's shape
+```
+
+A new `fact_writer.py` (sibling to the spine's `writer.py`, not an addition to it - the spine's
+`writer.py` is already ~137 lines for 3 checks + 11-table orchestration, and this widen step
+adds 5 more checks + 5-table orchestration, which would make one file unwieldy) reads
+reference tables from Delta, builds the five fact tables via `fact_entities.py`, runs the
+checks in 6.6.4 before any write, then writes all five - `write_fact_tables(spark, config) ->
+dict[str, int]`, same shape as the spine's `write_reference_tables`.
+
+### 6.6.6 Explicitly out of scope for W1a
+
+`order_events`, `courier_shifts`, `gps_pings`, Auto Loader (batch or streaming), and any
+dbt/transformation work remain out of scope - deferred to W1b and Sub-project C respectively.
+
+### 6.6.7 Success criteria
+
+- `qc-lakehouse/scripts/generate_fact_data.py` run against live Databricks produces all five
+  fact tables in `qc_dev.bronze_source`.
+- Total order count across all `orders` rows exactly matches the sum of `demand_hourly.orders`.
+- All new integrity checks (6.6.4) genuinely fail the run when violated (same proof-by-test
+  discipline as the spine).
+- Both defect types are present in the generated data and documented clearly enough that
+  Sub-project C's dbt staging models can reference them when writing cleaning logic.
+- `make check` gains real, fast, Spark-free unit test coverage for `defects.py`'s pure
+  functions.
 
 ## 7. Open questions for later sub-projects (not blocking A or B)
 
