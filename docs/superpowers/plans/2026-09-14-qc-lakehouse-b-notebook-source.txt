@@ -1,0 +1,838 @@
+
+================================================================================
+--- CELL 1 (position=0.5) ---
+================================================================================
+  %md
+  # 01 — Generate reference data + demand curve
+
+  Writes 10 Delta tables and prints a summary. Set `CATALOG` / `SCHEMA` first.
+
+  Produces the world at t0 — cities, zones, restaurants, riders, menu items,
+  customers, payout tiers — plus a per-day and per-hour plan of how many orders
+  to generate. Does NOT generate orders; notebook 02 reads these tables.
+
+================================================================================
+--- CELL 2 (position=1.0) ---
+================================================================================
+CATALOG = "qc_dev"          # <-- change if you use a different catalog
+SCHEMA = "bronze_source"
+DAYS = 90
+ORDERS_PER_DAY = 15_000     # BASELINE for an average day. Real totals run ~6%
+                            # higher because event days are genuinely busier.
+SEED = 20260908             # Change this for a different but equally valid world.
+START_DATE = "2026-06-01"   # a Monday, so day 0 starts a clean week
+
+N_CITIES, ZONES_PER_CITY = 3, 15
+# 3,000 riders, not 1,000. At 1,000 the baseline is 15.9 deliveries per rider
+# per day (~13 hours) and the festival is 47 (physically impossible).
+N_RESTAURANTS, N_RIDERS, N_CUSTOMERS = 1_000, 3_000, 300_000
+MENU_ITEMS_PER_RESTAURANT = 25
+
+
+================================================================================
+--- CELL 3 (position=1.0009765625) ---
+================================================================================
+import itertools
+import math
+import random
+from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
+
+from pyspark.sql import Window
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    BooleanType,
+    DateType,
+    DecimalType,
+    DoubleType,
+    IntegerType,
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
+
+spark.sql(f"CREATE CATALOG IF NOT EXISTS {CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+spark.sql(f"USE {CATALOG}.{SCHEMA}")
+
+# Pin the timezone. Every date -> timestamp cast below is interpreted in the
+# session zone, so without this the same notebook on a differently configured
+# cluster writes different timestamps, which defeats the seeded generator.
+spark.conf.set("spark.sql.session.timeZone", "UTC")
+
+start = date.fromisoformat(START_DATE)
+EPOCH = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+HISTORY_DAYS = 730          # entities were created in the 2 years BEFORE day 0
+
+
+def stream_seed(name: str) -> int:
+    """FNV-1a. Python's built-in hash() is salted per process, so it cannot be
+    used for anything that has to reproduce across runs. Separate streams per
+    entity type mean adding a feature cannot shift another feature's draws."""
+    h = 2_166_136_261
+    for b in name.encode():
+        h = ((h ^ b) * 16_777_619) & 0xFFFF_FFFF
+    return SEED ^ (h & 0x7FFF_FFFF)
+
+
+def allocate(total: Decimal, weights, places: int = 2):
+    """Largest-remainder split: parts sum EXACTLY to total, no drift.
+    Same routine used for money; here it splits entity counts and hours."""
+    q = Decimal(1).scaleb(-places)
+    wsum = sum(weights)
+    if wsum == 0:
+        raise ValueError("weights sum to zero")
+    exact = [total * Decimal(w) / Decimal(wsum) for w in weights]
+    floors = [e.quantize(q, rounding="ROUND_DOWN") for e in exact]
+    shortfall = int(((total - sum(floors)) / q).to_integral_value(ROUND_HALF_UP))
+    order = sorted(range(len(exact)), key=lambda i: (floors[i] - exact[i], i))
+    for i in order[:shortfall]:
+        floors[i] += q
+    return floors
+
+
+def split_by_share(total: int, shares):
+    return [int(p) for p in allocate(Decimal(total), [Decimal(str(s)) for s in shares], 0)]
+
+================================================================================
+--- CELL 4 (position=1.001953125) ---
+================================================================================
+CITIES = [
+    # name, country, timezone, lat, lon, share of the business
+    ("Bengaluru", "IN", "Asia/Kolkata", 12.9716, 77.5946, 0.42),
+    ("Mumbai", "IN", "Asia/Kolkata", 19.0760, 72.8777, 0.35),
+    ("Delhi", "IN", "Asia/Kolkata", 28.6139, 77.2090, 0.23),
+][:N_CITIES]
+
+# Ordered inner-to-outer: index 0 is the densest zone. Density decays outward,
+# which is what creates the hot-zone skew the file-layout work addresses.
+ZONE_NAMES = {
+    "Bengaluru": ["Indiranagar", "Koramangala", "HSR Layout", "Jayanagar", "BTM Layout",
+                  "Rajajinagar", "Malleshwaram", "Bellandur", "JP Nagar", "Banashankari",
+                  "Marathahalli", "Hebbal", "Whitefield", "Yelahanka", "Electronic City"],
+    "Mumbai": ["Lower Parel", "Bandra West", "Dadar", "Worli", "Andheri East",
+               "Juhu", "Kurla", "Chembur", "Powai", "Goregaon",
+               "Malad West", "Colaba", "Borivali", "Vashi", "Thane West"],
+    "Delhi": ["Connaught Place", "Karol Bagh", "Hauz Khas", "Lajpat Nagar", "Greater Kailash",
+              "Saket", "Nehru Place", "Model Town", "Rajouri Garden", "Pitampura",
+              "Janakpuri", "Vasant Kunj", "Mayur Vihar", "Rohini", "Dwarka"],
+}
+
+# Commission varies by cuisine because it does in reality. That spread is what
+# makes an as-of join on commission produce visibly different payouts.
+CUISINES = [
+    # name, share of restaurants, base commission, p50 prep minutes
+    ("North Indian", 0.22, 0.1800, 22), ("South Indian", 0.16, 0.1600, 14),
+    ("Chinese", 0.14, 0.2000, 18), ("Biryani", 0.13, 0.2200, 26),
+    ("Pizza", 0.11, 0.2400, 20), ("Burgers", 0.10, 0.2300, 12),
+    ("Desserts", 0.08, 0.1900, 10), ("Healthy Bowls", 0.06, 0.1700, 16),
+]
+
+BRAND_PREFIX = {
+    "North Indian": ["Punjabi", "Royal", "Tandoor", "Kesar", "Rajdhani", "Sagar"],
+    "South Indian": ["Udupi", "Anand", "Dosa", "Madras", "Coastal", "Nandini"],
+    "Chinese": ["Golden", "Wok", "Sichuan", "Chin", "Dragon", "Mandarin"],
+    "Biryani": ["Paradise", "Hyderabad", "Bawarchi", "Zaiqa", "Lucknowi", "Nawab"],
+    "Pizza": ["Napoli", "Crust", "Forno", "Slice", "Bella", "Roma"],
+    "Burgers": ["Grill", "Patty", "Smash", "Bun", "Char", "Stack"],
+    "Desserts": ["Sweet", "Cocoa", "Sugar", "Kulfi", "Frost", "Velvet"],
+    "Healthy Bowls": ["Green", "Fresh", "Root", "Sprout", "Nourish", "Clean"],
+}
+BRAND_CORE = {
+    "North Indian": ["Dhaba", "Rasoi", "Darbar", "Junction", "Tadka", "Angan"],
+    "South Indian": ["Tiffin", "Bhavan", "Corner", "Sagar", "Cafe", "Mess"],
+    "Chinese": ["Bowl", "Bay", "Express", "Garden", "Kitchen", "Palace"],
+    "Biryani": ["House", "Handi", "Dum", "Mahal", "Point", "Kitchen"],
+    "Pizza": ["Pizzeria", "Oven", "Co", "Kitchen", "Bakehouse", "Corner"],
+    "Burgers": ["Shack", "Yard", "Bros", "Works", "Company", "Joint"],
+    "Desserts": ["Bakery", "Patisserie", "Scoop", "Bar", "Room", "Studio"],
+    "Healthy Bowls": ["Bowl", "Kitchen", "Table", "Co", "Greens", "Bar"],
+}
+
+# 12 templates per cuisine. Each restaurant draws 25 items, so items repeat
+# across a chain with independently drifting prices — which is what gives the
+# SCD2 price history something non-trivial to track.
+MENUS = {
+    "North Indian": [("Paneer Butter Masala", "Mains", 280), ("Dal Makhani", "Mains", 240),
+                     ("Butter Chicken", "Mains", 360), ("Kadai Paneer", "Mains", 290),
+                     ("Chole Bhature", "Mains", 180), ("Butter Naan", "Breads", 60),
+                     ("Tandoori Roti", "Breads", 35), ("Laccha Paratha", "Breads", 70),
+                     ("Jeera Rice", "Rice", 150), ("Paneer Tikka", "Starters", 260),
+                     ("Boondi Raita", "Sides", 90), ("Gulab Jamun", "Desserts", 110)],
+    "South Indian": [("Masala Dosa", "Mains", 130), ("Plain Dosa", "Mains", 90),
+                     ("Ghee Roast Dosa", "Mains", 170), ("Idli Sambar", "Mains", 80),
+                     ("Rava Idli", "Mains", 100), ("Medu Vada", "Starters", 70),
+                     ("Upma", "Mains", 85), ("Pongal", "Mains", 110),
+                     ("Curd Rice", "Rice", 95), ("Lemon Rice", "Rice", 100),
+                     ("Filter Coffee", "Beverages", 45), ("Mysore Pak", "Desserts", 90)],
+    "Chinese": [("Veg Hakka Noodles", "Mains", 190), ("Chicken Fried Rice", "Rice", 230),
+                ("Chilli Paneer Dry", "Starters", 250), ("Chicken Manchurian", "Mains", 270),
+                ("Veg Spring Rolls", "Starters", 160), ("Schezwan Noodles", "Mains", 210),
+                ("Chicken Momos", "Starters", 180), ("Sweet Corn Soup", "Starters", 130),
+                ("Hot and Sour Soup", "Starters", 140), ("Kung Pao Chicken", "Mains", 300),
+                ("Chilli Garlic Rice", "Rice", 200), ("Honey Chilli Potato", "Sides", 170)],
+    "Biryani": [("Chicken Dum Biryani", "Mains", 330), ("Mutton Biryani", "Mains", 470),
+                ("Veg Biryani", "Mains", 240), ("Egg Biryani", "Mains", 260),
+                ("Chicken 65", "Starters", 280), ("Kebab Platter", "Starters", 390),
+                ("Mirchi Ka Salan", "Sides", 90), ("Raita", "Sides", 60),
+                ("Double Ka Meetha", "Desserts", 130), ("Haleem", "Mains", 340),
+                ("Chicken Fry Piece", "Starters", 220), ("Irani Chai", "Beverages", 40)],
+    "Pizza": [("Margherita", "Mains", 280), ("Farmhouse", "Mains", 420),
+              ("Peppy Paneer", "Mains", 400), ("Chicken Tikka Pizza", "Mains", 480),
+              ("Pepperoni", "Mains", 520), ("Garlic Bread", "Sides", 150),
+              ("Cheesy Dip", "Sides", 45), ("Chicken Wings", "Starters", 320),
+              ("Penne Alfredo", "Mains", 350), ("Choco Lava Cake", "Desserts", 120),
+              ("Cold Coffee", "Beverages", 140), ("Caesar Salad", "Starters", 260)],
+    "Burgers": [("Classic Veg Burger", "Mains", 150), ("Crispy Chicken Burger", "Mains", 230),
+                ("Double Cheese Burger", "Mains", 320), ("Paneer Tikka Burger", "Mains", 220),
+                ("Peri Peri Fries", "Sides", 130), ("Salted Fries", "Sides", 100),
+                ("Cheese Loaded Fries", "Sides", 190), ("Chicken Popcorn", "Starters", 180),
+                ("Onion Rings", "Sides", 140), ("Chocolate Shake", "Beverages", 180),
+                ("Iced Tea", "Beverages", 110), ("Brownie", "Desserts", 130)],
+    "Desserts": [("Red Velvet Pastry", "Desserts", 160), ("Chocolate Truffle", "Desserts", 180),
+                 ("Cheesecake Slice", "Desserts", 220), ("Tiramisu Jar", "Desserts", 240),
+                 ("Malai Kulfi", "Desserts", 90), ("Gulab Jamun Box", "Desserts", 200),
+                 ("Rasmalai", "Desserts", 150), ("Brownie Sundae", "Desserts", 210),
+                 ("Assorted Macarons", "Desserts", 320), ("Banoffee Pie", "Desserts", 250),
+                 ("Hot Chocolate", "Beverages", 150), ("Cold Brew", "Beverages", 170)],
+    "Healthy Bowls": [("Quinoa Power Bowl", "Mains", 340), ("Grilled Chicken Bowl", "Mains", 380),
+                      ("Falafel Mezze Bowl", "Mains", 320), ("Paneer Protein Bowl", "Mains", 350),
+                      ("Greek Salad", "Starters", 260), ("Hummus and Pita", "Starters", 240),
+                      ("Avocado Toast", "Starters", 280), ("Overnight Oats", "Mains", 190),
+                      ("Cold Pressed Juice", "Beverages", 160), ("Berry Smoothie", "Beverages", 200),
+                      ("Protein Ball", "Desserts", 120), ("Soup of the Day", "Starters", 180)],
+}
+
+VEHICLE_MIX = [("bike", 0.70), ("scooter", 0.22), ("car", 0.08)]
+TIER_MIX = [("bronze", 0.50), ("silver", 0.35), ("gold", 0.15)]
+
+# Rates as STRINGS, parsed to Decimal. A float literal like 6.5 cannot represent
+# a rate exactly and the error compounds across 1.4M payouts.
+TIER_RATES = [# tier, base fare, per km, per minute
+              ("bronze", "20.00", "6.5000", "0.5000"),
+              ("silver", "25.00", "7.2500", "0.6000"),
+              ("gold", "30.00", "8.0000", "0.7500")]
+
+
+
+================================================================================
+--- CELL 5 (position=1.00390625) ---
+================================================================================
+EARTH_KM = 6371.0088
+KM_PER_DEG_LAT = math.pi * EARTH_KM / 180.0     # ~111.19 km, constant everywhere
+GOLDEN_ANGLE = 137.50776405003785               # spreads points so none share a bearing
+
+
+def km_per_deg_lon(lat):
+    """Kilometres per degree of longitude AT THIS LATITUDE. Shrinks toward the poles."""
+    return KM_PER_DEG_LAT * math.cos(math.radians(lat))
+
+
+def offset_km(lat, lon, north_km, east_km):
+    """Move a point by a north/east displacement in km. Returns (lat, lon)."""
+    new_lat = lat + north_km / KM_PER_DEG_LAT
+    # Longitude degrees shrink with cos(latitude). Ignoring that is the classic
+    # bug that stretches a city east-west and inflates every rider payout.
+    scale = km_per_deg_lon((lat + new_lat) / 2)
+    return new_lat, lon + (east_km / scale if scale else 0.0)
+
+
+def destination(lat, lon, bearing, km):
+    """Point reached by travelling `km` along a compass bearing (0 = north)."""
+    t = math.radians(bearing)
+    return offset_km(lat, lon, km * math.cos(t), km * math.sin(t))
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance between two points, in km. ~0.5% off an ellipsoid,
+    far below the error from straight-line interpolation between GPS pings."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = (math.sin((p2 - p1) / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
+    return 2 * EARTH_KM * math.asin(math.sqrt(min(1.0, a)))
+
+
+def spiral_point(lat, lon, i, inner=1.6, step=1.15):
+    """Place zone `i` on a phyllotactic spiral around a city centre. sqrt radius
+    keeps the points roughly equal-area instead of bunching near the middle."""
+    return destination(lat, lon, (i * GOLDEN_ANGLE) % 360.0, inner + step * math.sqrt(i))
+
+
+def sample_around(rng, lat, lon, sigma_km, max_km):
+    """Draw a point near a centre, gaussian in both axes, truncated at max_km.
+    Gaussian because businesses cluster on a high street and thin out."""
+    for _ in range(12):
+        n, e = rng.gauss(0, sigma_km), rng.gauss(0, sigma_km)
+        if math.hypot(n, e) <= max_km:
+            return offset_km(lat, lon, n, e)
+    # Fell through 12 draws. Clamp rather than return the exact centre, which
+    # would create an implausible pile-up on one coordinate.
+    return offset_km(lat, lon, max_km * 0.7, max_km * 0.7)
+
+
+def zone_density(n, decay=6.0):
+    """Weights decaying exponentially from zone 0 outward, summing to 1. A flat
+    distribution would erase the hot-partition problem this project exists for."""
+    raw = [math.exp(-i / decay) for i in range(n)]
+    return [w / sum(raw) for w in raw]
+
+
+def zipf(n, exponent=0.85, offset=4.0):
+    """Popularity weight per rank, summing to 1. `offset` flattens the head; a
+    pure 1/rank curve hands one restaurant an implausible share of a city."""
+    raw = [1.0 / (i + 1 + offset) ** exponent for i in range(n)]
+    return [w / sum(raw) for w in raw]
+
+
+def pick(rng, options):
+    """Weighted choice from [(value, probability), ...]. Walks the cumulative sum."""
+    roll, acc = rng.random(), 0.0
+    for value, w in options:
+        acc += w
+        if roll < acc:
+            return value
+    return options[-1][0]      # float error guard: never fall off the end
+
+
+================================================================================
+--- CELL 6 (position=1.0078125) ---
+================================================================================
+# Monday-first, matching date.weekday(). Normalized so the mean is exactly 1.0,
+# otherwise ORDERS_PER_DAY would not mean what it says.
+DOW_RAW = [0.85, 0.82, 0.90, 1.10, 1.35, 1.45, 1.20]
+DOW = [m / (sum(DOW_RAW) / 7) for m in DOW_RAW]
+
+# Share of a day's orders per hour, index 0 = midnight.
+HOURLY_WEEKDAY = [0.02, 0.01, 0.01, 0.005, 0.005, 0.01, 0.03, 0.05, 0.08, 0.06, 0.05, 0.15,
+                  0.20, 0.12, 0.08, 0.06, 0.08, 0.12, 0.22, 0.25, 0.18, 0.12, 0.08, 0.05]
+HOURLY_WEEKEND = [0.04, 0.03, 0.02, 0.01, 0.01, 0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.14,
+                  0.16, 0.14, 0.10, 0.08, 0.09, 0.12, 0.18, 0.22, 0.24, 0.16, 0.10, 0.07]
+HOURLY_WEEKDAY = [w / sum(HOURLY_WEEKDAY) for w in HOURLY_WEEKDAY]
+HOURLY_WEEKEND = [w / sum(HOURLY_WEEKEND) for w in HOURLY_WEEKEND]
+
+# Lognormal, not gaussian: demand is strictly positive and right-skewed.
+NOISE_SIGMA = 0.08
+
+# A spike has shape, not a step. The day before picks up 30% of the boost, the
+# day after keeps 50% as demand settles.
+SHOULDER_BEFORE, SHOULDER_AFTER = 0.30, 0.50
+
+# One occasion roughly every 3 weeks. `position` is a fraction of the window, so
+# the same catalogue works at 7 days or 365. The storm is the interesting one: a
+# real event moves several variables at once, not just the order count.
+EVENTS = [
+    # name, position, peak, hour window, hour focus, transit, surge, cancel
+    ("sports_final", 0.13, 1.80, (18, 22), 2.2, 1.0, 1.0, 1.0),
+    ("storm", 0.38, 1.45, None, 1.0, 1.40, 1.60, 2.5),
+    # 0.66 not 0.68: at 0.68 the festival landed on day 61, a Saturday, which was
+    # already the busiest weekday. 0.66 puts it on day 59, a Thursday, so the
+    # dataset has one genuine mid-week demand shock.
+    ("festival", 0.66, 2.10, None, 1.0, 1.0, 1.0, 1.0),
+    ("long_weekend", 0.87, 1.30, None, 1.0, 1.0, 1.0, 1.0),
+]
+wanted = max(1, round(DAYS / 90 * 4))
+RESOLVED = []
+for ev in EVENTS[:wanted]:
+    day_index = round(ev[1] * (DAYS - 1))
+    if day_index not in [d for d, _ in RESOLVED]:
+        RESOLVED.append((day_index, ev))
+
+# Noise gets its own RNG stream so adding events or trends cannot shift it.
+_nrng = random.Random(stream_seed("noise"))
+NOISE = [math.exp(_nrng.gauss(0.0, NOISE_SIGMA)) for _ in range(DAYS)]
+
+
+def events_on(day_index):
+    """Events touching this day, each with its share of the boost."""
+    out = []
+    for d, ev in RESOLVED:
+        offset = day_index - d
+        if offset == 0:
+            out.append((ev, 1.0))
+        elif offset == -1:
+            out.append((ev, SHOULDER_BEFORE))
+        elif offset == 1:
+            out.append((ev, SHOULDER_AFTER))
+    return out
+
+
+def day_factors(day_index):
+    """Every input to one day's order count, kept separable so it can be audited."""
+    d = start + timedelta(days=day_index)
+    dow = DOW[d.weekday()]
+    event, names = 1.0, []
+    for ev, share in events_on(day_index):
+        event *= 1.0 + (ev[2] - 1.0) * share
+        names.append(ev[0])
+    noise = NOISE[day_index]
+    total = dow * event * noise
+    return d, d.weekday(), dow, event, noise, total, max(1, round(ORDERS_PER_DAY * total)), names
+
+
+def orders_by_hour(day_index):
+    """Split the day's orders across 24 hours, summing EXACTLY to the day total.
+    Rounding 24 hours independently loses orders the way naive rounding loses cents."""
+    _, weekday, *_, orders, _ = day_factors(day_index)
+    weights = list(HOURLY_WEEKEND if weekday >= 5 else HOURLY_WEEKDAY)
+    for ev, share in events_on(day_index):
+        if ev[3] and ev[4] != 1.0:
+            lo, hi = ev[3]
+            for h in range(lo, hi + 1):
+                weights[h % 24] *= 1.0 + (ev[4] - 1.0) * share
+    parts = allocate(Decimal(orders), [Decimal(str(w)) for w in weights], 0)
+    return [int(p) for p in parts]
+
+
+================================================================================
+--- CELL 7 (position=1.03125) ---
+================================================================================
+_rng = random.Random(stream_seed("cities"))
+
+
+def onboarded(rng):
+    """A creation timestamp somewhere in the 2 years before the window opens."""
+    return EPOCH - timedelta(seconds=rng.randint(1, HISTORY_DAYS * 86_400))
+
+
+cities = []
+for i, (name, cc, tz, lat, lon, share) in enumerate(CITIES, start=1):
+    t = onboarded(_rng)
+    cities.append((i, name, cc, tz, lat, lon, t, t))
+
+_rng = random.Random(stream_seed("zones"))
+zones, zid = [], itertools.count(1)
+for city_id, name, cc, tz, lat, lon, _, _ in cities:
+    for ring in range(ZONES_PER_CITY):
+        zlat, zlon = spiral_point(lat, lon, ring)
+        zname = ZONE_NAMES[name][ring] if ring < len(ZONE_NAMES[name]) else f"{name} Z{ring+1}"
+        t = onboarded(_rng)
+        zones.append((next(zid), city_id, zname, zlat, zlon, ring,
+                      Decimal(19 + 3 * (ring // 3)).quantize(Decimal("0.01")),
+                      # 38-52 min, not 28-42. Average delivery is 34.4 min, so the
+                      # old ladder breached on ~45% of orders. Real food delivery
+                      # quotes 30-45 min; the prep and transit times were fine, the
+                      # target was wrong.
+                      38 + 2 * (ring // 2),
+                      True, t, t))
+
+zone_by_id = {z[0]: z for z in zones}
+zones_of_city = {c[0]: [z for z in zones if z[1] == c[0]] for c in cities}
+
+_rng = random.Random(stream_seed("restaurants"))
+restaurants, rid, used_names = [], itertools.count(1), set()
+per_city = split_by_share(N_RESTAURANTS, [c[5] for c in CITIES])
+for (city, count) in zip(cities, per_city):
+    czones = zones_of_city[city[0]]
+    for zone, zcount in zip(czones, split_by_share(count, zone_density(len(czones)))):
+        zcount = max(1, zcount)   # every zone must be able to serve an order
+        for cuisine, ccount in zip(CUISINES, split_by_share(zcount, [c[1] for c in CUISINES])):
+            if ccount == 0:
+                continue
+            combos = [f"{p} {c}" for p in BRAND_PREFIX[cuisine[0]] for c in BRAND_CORE[cuisine[0]]]
+            _rng.shuffle(combos)
+            # Fewer brands than outlets on purpose: multi-outlet chains make
+            # "which outlet of this brand is slowest" a real question.
+            brands = combos[:max(1, round(ccount * 0.6))]
+            for i in range(ccount):
+                brand = brands[i % len(brands)]
+                nm, n = brand, 2
+                while nm in used_names:
+                    nm = f"{brand} - {zone[2]}" if n == 2 else f"{brand} - {zone[2]} {n}"
+                    n += 1
+                used_names.add(nm)
+                rlat, rlon = sample_around(_rng, zone[3], zone[4], 0.7, 2.0)
+                r = next(rid)
+                t = onboarded(_rng)
+                restaurants.append([
+                    r, f"R-{r:05d}", nm, cuisine[0], city[0], zone[0], rlat, rlon,
+                    # +/- 3 points around the cuisine midpoint, quantized to 4
+                    # places exactly ONCE. Rounding twice introduces money bugs.
+                    Decimal(str(round(cuisine[2] + _rng.uniform(-0.03, 0.03), 4)))
+                        .quantize(Decimal("0.0001")),
+                    f"ACCT-R-{r:06d}",
+                    max(5, round(_rng.gauss(cuisine[3], 3.5))),    # prep_time_p50_minutes
+                    _rng.random() > 0.02,   # ~2% already closed at t0
+                    t, t,
+                    0.0,                                  # popularity (generator-only)
+                    round(_rng.uniform(0.82, 1.38), 3),   # price index (generator-only)
+                ])
+
+# Popularity by SHUFFLED rank, so it is uncorrelated with restaurant_id. If rank
+# tracked ID, sequential-key clustering would look artificially good in the
+# file-layout benchmark and the result would be a lie.
+ranks = list(range(len(restaurants)))
+_rng.shuffle(ranks)
+zw = zipf(len(restaurants))
+for r, rank in zip(restaurants, ranks):
+    r[14] = zw[rank]
+
+# Riders follow demand. A uniform spread would leave the busiest zones
+# undersupplied and make every delivery in them look pathologically late.
+_rng = random.Random(stream_seed("riders"))
+riders, drid = [], itertools.count(1)
+per_city = split_by_share(N_RIDERS, [c[5] for c in CITIES])
+for city, count in zip(cities, per_city):
+    czones = zones_of_city[city[0]]
+    for zone, zcount in zip(czones, split_by_share(count, zone_density(len(czones)))):
+        for _ in range(zcount):
+            d = next(drid)
+            t = onboarded(_rng)
+            riders.append((d, f"D-{d:05d}",
+                           pick(_rng, VEHICLE_MIX),
+                           pick(_rng, TIER_MIX),
+                           zone[0], f"ACCT-D-{d:06d}",
+                           _rng.random() > 0.04,       # ~4% churned
+                           t, t))
+
+_rng = random.Random(stream_seed("menu"))
+VARIANTS = ["Regular", "Large", "Family Pack", "Mini"]
+VFACTOR = [1.0, 1.45, 2.1, 0.7]
+menu_items, mid = [], itertools.count(1)
+for r in restaurants:
+    templates = MENUS[r[3]]
+    for i in range(MENU_ITEMS_PER_RESTAURANT):
+        template, variant = templates[i % len(templates)], i // len(templates)
+        nm = template[0] if variant == 0 else f"{template[0]} ({VARIANTS[variant % 4]})"
+        price = template[2] * r[15] * (VFACTOR[variant % 4] if variant else 1.0)
+        price *= _rng.uniform(0.96, 1.04)    # per-outlet jitter across a chain
+        m = next(mid)
+        # Menu prices end in 9 in reality. Quantized exactly once.
+        menu_items.append((m, r[0], nm, template[1],
+                           Decimal(max(1, round(price / 10)) * 10 - 1).quantize(Decimal("0.01")),
+                           _rng.random() > 0.05,   # ~5% out of stock
+                           r[12], r[12]))
+
+# Open-ended (valid_to = NULL). The mid-window rate change is a CHANGE and
+# belongs in the CDC stream, not in initial state — otherwise the generator's
+# history and the CDC stream's history can disagree.
+tier_from = EPOCH - timedelta(days=HISTORY_DAYS)
+payout_tiers = [(t[0], tier_from, None, Decimal(t[1]), Decimal(t[2]), Decimal(t[3]))
+                for t in TIER_RATES]
+
+
+
+================================================================================
+--- CELL 8 (position=1.0625) ---
+================================================================================
+# Explicit types, because inferring a schema from Python would turn every
+# Decimal into a double and silently lose money precision.
+TS, D2, D4, R5 = TimestampType(), DecimalType(18, 2), DecimalType(18, 4), DecimalType(5, 4)
+
+
+def write(name, rows, schema):
+    """Overwrite one Delta table from a list of Python tuples, return its row count."""
+    (spark.createDataFrame(rows, schema)
+        .write.mode("overwrite")                       # idempotent: rerunning is safe
+        .option("overwriteSchema", "true")             # let column changes through
+        .saveAsTable(f"{CATALOG}.{SCHEMA}.{name}"))
+    return spark.table(f"{CATALOG}.{SCHEMA}.{name}").count()
+
+
+counts = {}
+
+counts["cities"] = write("cities", cities, StructType([
+    StructField("city_id", LongType()), StructField("name", StringType()),
+    StructField("country_code", StringType()), StructField("timezone", StringType()),
+    StructField("lat", DoubleType()), StructField("lon", DoubleType()),
+    StructField("created_at", TS), StructField("updated_at", TS)]))
+
+counts["zones"] = write("zones", zones, StructType([
+    StructField("zone_id", LongType()), StructField("city_id", LongType()),
+    StructField("name", StringType()), StructField("center_lat", DoubleType()),
+    StructField("center_lon", DoubleType()), StructField("ring", IntegerType()),
+    StructField("base_delivery_fee", D2), StructField("sla_target_minutes", IntegerType()),
+    StructField("is_active", BooleanType()),
+    StructField("created_at", TS), StructField("updated_at", TS)]))
+
+# r[:14] drops popularity_weight and price_index ON PURPOSE: the OLTP database
+# does not know how popular a restaurant is. That has to be discovered from
+# order volume. Leaking it here makes every "what's trending" query a tautology.
+counts["restaurants"] = write("restaurants", [tuple(r[:14]) for r in restaurants], StructType([
+    StructField("restaurant_id", LongType()), StructField("restaurant_ref", StringType()),
+    StructField("name", StringType()), StructField("cuisine_type", StringType()),
+    StructField("city_id", LongType()), StructField("zone_id", LongType()),
+    StructField("lat", DoubleType()), StructField("lon", DoubleType()),
+    StructField("commission_pct", R5), StructField("payout_account_id", StringType()),
+    StructField("prep_time_p50_minutes", IntegerType()), StructField("is_active", BooleanType()),
+    StructField("created_at", TS), StructField("updated_at", TS)]))
+
+counts["riders"] = write("riders", riders, StructType([
+    StructField("rider_id", LongType()), StructField("rider_ref", StringType()),
+    StructField("vehicle_type", StringType()), StructField("payout_tier", StringType()),
+    StructField("home_zone_id", LongType()), StructField("payout_account_id", StringType()),
+    StructField("is_active", BooleanType()),
+    StructField("created_at", TS), StructField("updated_at", TS)]))
+
+counts["menu_items"] = write("menu_items", menu_items, StructType([
+    StructField("menu_item_id", LongType()), StructField("restaurant_id", LongType()),
+    StructField("name", StringType()), StructField("category", StringType()),
+    StructField("price", D2), StructField("is_available", BooleanType()),
+    StructField("created_at", TS), StructField("updated_at", TS)]))
+
+# DECIMAL(18,4) on the rates and (18,2) on the fare: rates get multiplied by
+# distance and time, so they need extra places before the result is quantized.
+counts["rider_payout_tiers"] = write("rider_payout_tiers", payout_tiers, StructType([
+    StructField("tier", StringType()), StructField("valid_from", TS),
+    StructField("valid_to", TS), StructField("base_fare", D2),
+    StructField("per_km_rate", D4), StructField("per_minute_rate", D4)]))
+
+# The generator's private view. In a separate `_gen_` table so it is obvious
+# these are NOT source columns — the pipeline must never join to this.
+counts["_gen_restaurant_profile"] = write("_gen_restaurant_profile",
+    [(r[0], float(r[14]), float(r[15])) for r in restaurants], StructType([
+        StructField("restaurant_id", LongType()),
+        StructField("popularity_weight", DoubleType()),
+        StructField("price_index", DoubleType())]))
+
+
+================================================================================
+--- CELL 9 (position=1.125) ---
+================================================================================
+FIRST = ["Aarav", "Aditi", "Advait", "Ananya", "Arjun", "Bhavna", "Chirag", "Deepa",
+         "Devansh", "Divya", "Farhan", "Gauri", "Harsh", "Ishaan", "Isha", "Jatin",
+         "Kavya", "Kabir", "Lakshmi", "Manav", "Meera", "Neha", "Nikhil", "Ojas",
+         "Pallavi", "Pranav", "Priya", "Rahul", "Rhea", "Rohit", "Sanjana", "Sameer",
+         "Shreya", "Siddharth", "Tanvi", "Tarun", "Uma", "Varun", "Vidya", "Yash"]
+LAST = ["Agarwal", "Bansal", "Bhat", "Chandra", "Chopra", "Desai", "Dutta", "Gupta",
+        "Iyer", "Jain", "Joshi", "Kapoor", "Khanna", "Kulkarni", "Kumar", "Malhotra",
+        "Mehta", "Menon", "Mishra", "Nair", "Pandey", "Patel", "Pillai", "Rao",
+        "Reddy", "Saxena", "Shah", "Sharma", "Shetty", "Singh", "Sinha", "Verma"]
+DOMAINS = ["gmail.com", "outlook.com", "yahoo.in", "hotmail.com", "proton.me"]
+
+# Same inner-heavy density as restaurants, as CUMULATIVE thresholds so Spark can
+# bucket a uniform draw with a join instead of a per-row loop.
+zone_probs, cum = [], 0.0
+per_city_cust = split_by_share(N_CUSTOMERS, [c[5] for c in CITIES])
+for city, ccount in zip(cities, per_city_cust):
+    czones = zones_of_city[city[0]]
+    for zone, zcount in zip(czones, split_by_share(ccount, zone_density(len(czones)))):
+        cum += zcount / N_CUSTOMERS
+        zone_probs.append((zone[0], city[0], zone[3], zone[4], cum))
+
+zone_map = spark.createDataFrame(zone_probs, "zone_id long, city_id long, "
+                                             "zlat double, zlon double, cum double")
+
+
+def h(col, salt):
+    """Reproducible uniform [0,1) from a column value plus a salt. F.rand() is
+    non-deterministic under task retries and shuffles, so a rerun would produce
+    different data. hash(id, salt) is a pure function of the row."""
+    return F.pmod(F.hash(col, F.lit(salt)), F.lit(1_000_000)) / 1_000_000.0
+
+
+base = (spark.range(1, N_CUSTOMERS + 1).withColumnRenamed("id", "customer_id")
+        .withColumn("u_zone", h(F.col("customer_id"), SEED + 1)))
+
+customers = (base
+    # Broadcast the 45-row zone map to every executor — no shuffle. The join
+    # matches every zone whose cumulative threshold clears the draw; the
+    # smallest one is the bucket the draw actually landed in.
+    .join(F.broadcast(zone_map), base.u_zone <= zone_map.cum, "left")
+    .withColumn("rn", F.row_number().over(
+        Window.partitionBy("customer_id").orderBy("cum")))
+    .filter("rn = 1").drop("rn", "cum", "u_zone")
+    # element_at is 1-based, hence the + 1.
+    .withColumn("first_name", F.element_at(F.array(*[F.lit(x) for x in FIRST]),
+                (F.pmod(F.hash("customer_id", F.lit(SEED + 2)), F.lit(len(FIRST))) + 1).cast("int")))
+    .withColumn("last_name", F.element_at(F.array(*[F.lit(x) for x in LAST]),
+                (F.pmod(F.hash("customer_id", F.lit(SEED + 3)), F.lit(len(LAST))) + 1).cast("int")))
+    .withColumn("full_name", F.concat_ws(" ", "first_name", "last_name"))
+    .withColumn("customer_ref", F.format_string("C-%07d", F.col("customer_id")))
+    # Raw PII, stored deliberately: pseudonymization at Silver has to be real
+    # work with a real column mask. customer_id in the local part keeps 300k
+    # emails unique from a 40x32 name pool.
+    .withColumn("email", F.concat(F.lower(F.col("first_name")), F.lit("."),
+                F.lower(F.col("last_name")), F.col("customer_id").cast("string"), F.lit("@"),
+                F.element_at(F.array(*[F.lit(x) for x in DOMAINS]),
+                (F.pmod(F.hash("customer_id", F.lit(SEED + 4)), F.lit(len(DOMAINS))) + 1).cast("int"))))
+    # Indian mobile range: 10 digits starting 6-9.
+    .withColumn("phone", F.concat(F.lit("+91"),
+                (F.lit(6_000_000_000) + F.pmod(F.abs(F.hash("customer_id", F.lit(SEED + 5))),
+                                               F.lit(4_000_000_000))).cast("string")))
+    # +/- 0.009 deg (~1 km) around the zone centre. Longitude divided by
+    # cos(lat) so the spread is circular on the ground, not an ellipse.
+    .withColumn("lat", F.col("zlat") + (h(F.col("customer_id"), SEED + 6) - 0.5) * 0.018)
+    .withColumn("lon", F.col("zlon") + (h(F.col("customer_id"), SEED + 7) - 0.5) * 0.018
+                / F.cos(F.radians(F.col("zlat"))))
+    # timestampadd, not interval arithmetic: Spark cannot multiply an interval
+    # by a column.
+    .withColumn("signup_ts", F.expr(
+        f"timestampadd(SECOND, "
+        f"-(pmod(abs(hash(customer_id, {SEED + 8})), {HISTORY_DAYS * 86_400}) + 1), "
+        f"timestamp'{EPOCH.strftime('%Y-%m-%d %H:%M:%S')}')"))
+    # Lognormal via Box-Muller: most people order occasionally and a few order
+    # constantly. Gaussian would give everyone identical habits.
+    .withColumn("order_propensity",
+                F.exp(F.lit(0.75) * F.sqrt(F.lit(-2.0) * F.log(h(F.col("customer_id"), SEED + 9)
+                      + F.lit(1e-9))) * F.cos(F.lit(2 * math.pi)
+                      * h(F.col("customer_id"), SEED + 10))))
+    .select("customer_id", "customer_ref", "email", "phone", "full_name", "city_id",
+            F.col("zone_id").alias("home_zone_id"), "lat", "lon", "signup_ts",
+            F.col("signup_ts").alias("created_at"), F.col("signup_ts").alias("updated_at"),
+            "order_propensity"))
+
+# Same split as restaurants: the source table, and the generator's private
+# profile that the pipeline is not allowed to read.
+(customers.drop("order_propensity").write.mode("overwrite")
+    .option("overwriteSchema", "true").saveAsTable(f"{CATALOG}.{SCHEMA}.customers"))
+(customers.select("customer_id", "order_propensity").write.mode("overwrite")
+    .option("overwriteSchema", "true").saveAsTable(f"{CATALOG}.{SCHEMA}._gen_customer_profile"))
+counts["customers"] = spark.table(f"{CATALOG}.{SCHEMA}.customers").count()
+
+
+
+================================================================================
+--- CELL 10 (position=1.25) ---
+================================================================================
+
+
+# One row per day, every factor as its own column so the curve can be audited.
+daily = []
+for d in range(DAYS):
+    dt, weekday, dow, event, noise, total, orders, names = day_factors(d)
+    daily.append((d, dt, weekday, float(dow), float(event), float(noise), float(total),
+                  orders, ",".join(names) or None))
+
+# 90 x 24 = 2,160 rows, guaranteed to sum back to daily.orders per day.
+hourly = [(d, start + timedelta(days=d), hour, n)
+          for d in range(DAYS) for hour, n in enumerate(orders_by_hour(d))]
+
+counts["demand_daily"] = write("demand_daily", daily, StructType([
+    StructField("day_index", IntegerType()), StructField("order_date", DateType()),
+    StructField("weekday", IntegerType()), StructField("dow_multiplier", DoubleType()),
+    StructField("event_multiplier", DoubleType()), StructField("noise", DoubleType()),
+    StructField("total_multiplier", DoubleType()), StructField("orders", IntegerType()),
+    StructField("event_names", StringType())]))
+
+counts["demand_hourly"] = write("demand_hourly", hourly, StructType([
+    StructField("day_index", IntegerType()), StructField("order_date", DateType()),
+    StructField("hour", IntegerType()), StructField("orders", IntegerType())]))
+
+
+================================================================================
+--- CELL 11 (position=1.250244140625) ---
+================================================================================
+print(f"catalog: {CATALOG}.{SCHEMA}\n")
+for name, n in counts.items():
+    print(f"  {name:<28} {n:>10,}")
+
+total = sum(d[7] for d in daily)
+print(f"\nbaseline {DAYS * ORDERS_PER_DAY:,}  actual {total:,}  "
+      f"uplift {total / (DAYS * ORDERS_PER_DAY) - 1:+.1%}")
+
+# The 24 hourly counts must reconstruct the day exactly. If this prints BROKEN,
+# the allocator is wrong and the same bug would be losing cents in the payouts.
+bad = [d for d in range(DAYS) if sum(orders_by_hour(d)) != daily[d][7]]
+print(f"hour/day conservation: {'OK' if not bad else f'BROKEN on days {bad}'}")
+
+# Rider capacity sanity. At ~35 min per delivery plus a return leg, one rider
+# sustains roughly 10-12 deliveries in a shift. Anything past that means the
+# fleet is physically incapable of the day and delivery times are fiction.
+active = sum(1 for r in riders if r[6])
+peak = max(d[7] for d in daily)
+print(f"\nactive riders {active:,}")
+print(f"  mean day {total // DAYS:>7,} orders -> {total / DAYS / active:5.1f} per rider")
+print(f"  peak day {peak:>7,} orders -> {peak / active:5.1f} per rider")
+
+for d, ev in RESOLVED:
+    day = start + timedelta(days=d)
+    print(f"  day {d:>3} {day} {day.strftime('%a')} {ev[0]:<14} "
+          f"x{ev[2]:.2f} -> {daily[d][7]:,} orders")
+
+print("\nmean orders by weekday:")
+for i, label in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
+    vals = [x[7] for x in daily if x[2] == i]
+    print(f"  {label} {sum(vals) / len(vals):>9,.0f}")
+
+# A longitude bug here would silently corrupt every distance-based payout.
+z0, z1 = zones[0], zones[ZONES_PER_CITY - 1]
+print(f"\ngeography: {z0[2]} to {z1[2]} = "
+      f"{haversine_km(z0[3], z0[4], z1[3], z1[4]):.2f} km")
+print(f"SLA ladder: {min(z[7] for z in zones)}-{max(z[7] for z in zones)} min")
+
+
+================================================================================
+--- CELL 12 (position=1.25048828125) ---
+================================================================================
+%sql
+-- The curve. Switch to a line chart on order_date / orders to see the weekly
+-- sawtooth, the four spikes, and the noise.
+SELECT order_date, weekday, orders, event_names FROM demand_daily ORDER BY day_index
+
+
+================================================================================
+--- CELL 13 (position=1.2509765625) ---
+================================================================================
+%sql
+-- Restaurant and rider skew: how unequal the inner zones are vs the outskirts.
+SELECT z.name AS zone, z.ring, z.sla_target_minutes,
+       count(DISTINCT r.restaurant_id) AS restaurants,
+       count(DISTINCT d.rider_id)      AS riders
+FROM zones z
+LEFT JOIN restaurants r ON r.zone_id = z.zone_id
+LEFT JOIN riders d ON d.home_zone_id = z.zone_id AND d.is_active
+GROUP BY z.name, z.ring, z.sla_target_minutes
+ORDER BY restaurants DESC
+
+================================================================================
+--- CELL 14 (position=1.251953125) ---
+================================================================================
+%sql
+-- Integrity: every row must return 0.
+SELECT 'restaurant -> zone' AS check, count(*) AS orphans
+  FROM restaurants r LEFT ANTI JOIN zones z USING (zone_id)
+UNION ALL SELECT 'rider -> zone', count(*)
+  FROM riders d LEFT ANTI JOIN zones z ON d.home_zone_id = z.zone_id
+UNION ALL SELECT 'menu_item -> restaurant', count(*)
+  FROM menu_items m LEFT ANTI JOIN restaurants r USING (restaurant_id)
+UNION ALL SELECT 'customer -> zone', count(*)
+  FROM customers c LEFT ANTI JOIN zones z ON c.home_zone_id = z.zone_id
+UNION ALL SELECT 'zone with no restaurants', count(*)
+  FROM zones z LEFT ANTI JOIN restaurants r USING (zone_id)
+UNION ALL SELECT 'zone with no active riders', count(*)
+  FROM zones z LEFT ANTI JOIN (SELECT DISTINCT home_zone_id FROM riders WHERE is_active) d
+    ON d.home_zone_id = z.zone_id
+
+================================================================================
+--- CELL 15 (position=1.25390625) ---
+================================================================================
+
+
+================================================================================
+--- CELL 16 (position=1.2578125) ---
+================================================================================
+
+
+================================================================================
+--- CELL 17 (position=1.265625) ---
+================================================================================
+
+
+================================================================================
+--- CELL 18 (position=1.28125) ---
+================================================================================
+
+
+================================================================================
+--- CELL 19 (position=1.3125) ---
+================================================================================
+
+
+================================================================================
+--- CELL 20 (position=1.375) ---
+================================================================================
+%md
+
+
+================================================================================
+--- CELL 21 (position=1.5) ---
+================================================================================
+
+
+================================================================================
+--- CELL 22 (position=2.0) ---
+================================================================================
+%md
+
