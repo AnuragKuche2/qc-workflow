@@ -341,6 +341,16 @@ isn't part of this repo - so the schemas below are designed fresh, not ported).
   etc., not passing `zones: list[tuple]` across a process boundary. The spine's `writer.py`
   keeps building everything in one in-memory pass; this widen step is architecturally a
   different, later run.
+- **Generation is Spark-native throughout, not Python loops.** Order volume is driven by
+  `demand_hourly`'s counts and can reach roughly 1.3-2M+ rows (baseline `orders_per_day=15_000`
+  x `days=90`, plus event-day spikes) - at that scale, driver-side Python loops (the style
+  `entities.py` uses for `restaurants`/`riders`, which only reach low thousands) would be slow
+  and wouldn't use the serverless compute the project pays for. `fact_entities.py` follows the
+  spine's `customers.py` pattern instead: deterministic hash-based field derivation
+  (`F.hash(col, salt)`, never `F.rand()`) and broadcast joins against the small reference
+  tables, all as Spark DataFrame pipelines. Tested the same way `customers.py` is - via
+  `qc_lakehouse.spark_local.build_local_spark_session()`, not plain `pytest` - since this code
+  is Spark-dependent by design, not incidentally.
 - **Deliberate defects, isolated in their own module** (`defects.py`), so they're
   independently unit-testable and their probability is controlled by explicit
   `GeneratorConfig` fields, not hardcoded:
@@ -418,8 +428,9 @@ qc_lakehouse/generator/
                       # mangle_text_casing_and_whitespace(text, rng) -> str - no rate logic here,
                       # callers decide whether to apply based on GeneratorConfig's rate fields
   fact_entities.py     # build_orders, build_order_items, build_match_attempts, build_payments,
-                        # build_refunds - reads demand_hourly + reference tables back from
-                        # Delta (spark.table(...)), builds the money chain in memory
+                        # build_refunds - each a Spark DataFrame pipeline (like customers.py,
+                        # not entities.py's Python loops - see 6.6.2), reading demand_hourly +
+                        # reference tables back from Delta via spark.table(...)
   fact_writer.py         # write_fact_tables(spark, config) -> dict[str, int]: runs the 6.6.4
                           # integrity checks before any write, then writes all five tables -
                           # sibling to the spine's writer.py, not an addition to it
