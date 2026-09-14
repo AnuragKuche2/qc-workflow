@@ -1,0 +1,14 @@
+[project]
+name = "qc-lakehouse"
+version = "0.1.0"
+description = "QC Lakehouse - Databricks + dbt hero quick-commerce data pipeline"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
