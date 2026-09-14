@@ -1,6 +1,6 @@
 # QC Lakehouse (Databricks-Hero) - Design
 
-**Status:** Approved for sub-project A. Sub-projects B-G are decomposed below but not yet individually designed.
+**Status:** Approved for sub-project A. Sub-projects B-H are decomposed below but not yet individually designed.
 
 ## 1. Background
 
@@ -65,6 +65,15 @@ or the text-to-SQL agent.
 - AI/RAG layer uses Databricks Vector Search (not FAISS) where Free Edition supports it, plus
   the Anthropic Claude API for enrichment, matching the original plan's tiered-model approach
   (Haiku for full-volume enrichment, Opus for an eval slice).
+- **Idempotency:** every ingestion and transformation task must be safely re-runnable with the
+  same input and produce the same result - MERGE-based upserts keyed on a natural/business
+  key, never blind `INSERT`/append-only writes for anything Airflow might retry. This applies
+  to B (bronze ingestion) and C (dbt incremental models) equally.
+- **Effectively-once, not literal exactly-once:** true exactly-once delivery does not exist in
+  distributed systems. The achievable and correct target is *effectively-once results under
+  retries*, via Structured Streaming checkpoints (B) plus idempotent MERGE writes (B, C) plus
+  Airflow tasks that are safe to retry without operator intervention (E). Any doc/README
+  language must say "effectively-once," not "exactly-once."
 
 ## 4. Sub-project decomposition
 
@@ -80,10 +89,27 @@ when its turn comes. This document only fully specifies **Sub-project A**.
 | E | Orchestration | B, C (D, G once they exist) | Dockerized Airflow triggering Databricks Jobs for ingestion/dbt/AI/text-to-SQL tasks, retries/SLAs |
 | F | Polish | A-E | CI (GitHub Actions), Free Edition credit/cost guardrails, README/narrative, optional Streamlit dashboard |
 | G | Text-to-SQL analytics agent | C (D optional, enriches answerable questions) | Custom Claude-based agent: natural-language question -> generated SQL -> executed against gold marts (and D's review-issue marts once they exist) -> answer. Own prompting/schema-context/validation, not Databricks Genie |
+| H | Performance, maintenance & cost optimization lab | B, C | Benchmark partitioning vs Z-order vs Liquid Clustering on a fan-out-scale table; scheduled `OPTIMIZE`/`ANALYZE`/`VACUUM` as maintenance tasks in E; cost-based comparison report per layout using real Databricks cost signals, not assertions |
 
 MVP/Level 1 = a thin slice through A -> B -> C -> E: one bronze table, one dbt model,
-one Airflow DAG that successfully triggers a Databricks job. D and G layer on afterward, in
-either order, once C's gold marts exist.
+one Airflow DAG that successfully triggers a Databricks job, built idempotently from the
+start. D, G, and H layer on afterward, in any order, once C's gold marts exist and carry
+real data volume.
+
+**H's scope in more detail** (deferred to H's own design pass, noted now so it isn't lost):
+- Layout comparison on a table with enough rows that file-skipping differences are actually
+  observable (the old plan's ADR-016 found that at small scale, `OPTIMIZE` compacts a table
+  to one file and every layout measures identically - the benchmark table needs a deliberate
+  fan-out, not the pipeline's normal MVP-scale data).
+- Compare: no clustering (baseline) vs. partition-by-date vs. `ZORDER BY` on high-cardinality
+  predicate columns vs. Delta Liquid Clustering - Databricks' current recommended replacement
+  for partitioning+Z-order on new tables.
+- `OPTIMIZE`, `ANALYZE` (stats for the query optimizer), and `VACUUM` (with an explicit,
+  safe retention policy - never below Delta's 7-day default without a stated reason) become
+  scheduled maintenance tasks orchestrated by Airflow (E), not one-off manual commands.
+- Cost evaluation uses real Databricks signals (e.g. `system.billing.usage`, query-level
+  bytes-scanned) rather than proxies - pending confirmation that Free Edition exposes these
+  system tables (see open questions).
 
 ## 5. Sub-project A: Foundation & Environment - detailed design
 
@@ -155,3 +181,7 @@ does not build pipeline or transformation logic - that's B and C.
 - How Sub-project G's agent gets schema context (static schema dump vs. live `information_schema`
   lookups vs. a fixed set of vetted query templates it fills in) and how generated SQL is
   validated/sandboxed before execution against real gold marts - defer to G's design.
+- Whether Databricks Free Edition exposes `system.billing.usage` / `system.query.history` (or
+  equivalents) for real cost measurement in Sub-project H, or whether a fallback (bytes-scanned
+  from query metrics, DBU-seconds estimated from job run duration) is needed - confirm during
+  H's design, since Free Edition's system-table access may differ from a paid workspace.
