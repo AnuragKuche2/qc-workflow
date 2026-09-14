@@ -3,7 +3,13 @@ from decimal import Decimal
 
 from qc_lakehouse.generator.math_utils import (
     allocate,
+    destination,
+    haversine_km,
+    km_per_deg_lon,
+    offset_km,
     pick,
+    sample_around,
+    spiral_point,
     split_by_share,
     stream_seed,
     zipf,
@@ -80,3 +86,43 @@ def test_pick_never_falls_off_the_end_on_float_rounding():
     # option rather than None if the roll exceeds the cumulative sum.
     result = pick(rng, [("a", 0.3), ("b", 0.3), ("c", 0.3999999999999)])
     assert result in ("a", "b", "c")
+
+
+def test_km_per_deg_lon_shrinks_toward_the_poles():
+    equator = km_per_deg_lon(0.0)
+    mid_lat = km_per_deg_lon(45.0)
+    assert equator > mid_lat > 0
+
+
+def test_offset_km_moves_north_and_east_correctly():
+    lat, lon = offset_km(0.0, 0.0, north_km=111.19, east_km=0.0)
+    assert abs(lat - 1.0) < 0.01     # ~111.19 km north is ~1 degree of latitude
+    assert abs(lon - 0.0) < 1e-9      # pure north movement doesn't change longitude
+
+
+def test_destination_and_haversine_are_consistent():
+    lat0, lon0 = 12.9716, 77.5946   # Bengaluru
+    lat1, lon1 = destination(lat0, lon0, bearing=90, km=5.0)
+    dist = haversine_km(lat0, lon0, lat1, lon1)
+    assert abs(dist - 5.0) < 0.05    # round-trip should recover ~5 km
+
+
+def test_haversine_km_zero_distance_for_same_point():
+    assert haversine_km(12.97, 77.59, 12.97, 77.59) == 0.0
+
+
+def test_spiral_point_places_successive_zones_farther_out():
+    lat0, lon0 = 12.9716, 77.5946
+    p0 = spiral_point(lat0, lon0, 0)
+    p5 = spiral_point(lat0, lon0, 5)
+    d0 = haversine_km(lat0, lon0, *p0)
+    d5 = haversine_km(lat0, lon0, *p5)
+    assert d5 > d0
+
+
+def test_sample_around_stays_within_max_km():
+    rng = random.Random(7)
+    lat0, lon0 = 12.9716, 77.5946
+    for _ in range(50):
+        lat, lon = sample_around(rng, lat0, lon0, sigma_km=0.7, max_km=2.0)
+        assert haversine_km(lat0, lon0, lat, lon) <= 2.0 + 1e-6

@@ -58,3 +58,55 @@ def pick(rng: random.Random, options: Sequence):
         if roll < acc:
             return value
     return options[-1][0]      # float error guard: never fall off the end
+
+
+EARTH_KM = 6371.0088
+KM_PER_DEG_LAT = math.pi * EARTH_KM / 180.0     # ~111.19 km, constant everywhere
+GOLDEN_ANGLE = 137.50776405003785               # spreads points so none share a bearing
+
+
+def km_per_deg_lon(lat: float) -> float:
+    """Kilometres per degree of longitude AT THIS LATITUDE. Shrinks toward the poles."""
+    return KM_PER_DEG_LAT * math.cos(math.radians(lat))
+
+
+def offset_km(lat: float, lon: float, north_km: float, east_km: float) -> tuple[float, float]:
+    """Move a point by a north/east displacement in km. Returns (lat, lon)."""
+    new_lat = lat + north_km / KM_PER_DEG_LAT
+    # Longitude degrees shrink with cos(latitude). Ignoring that is the classic
+    # bug that stretches a city east-west and inflates every rider payout.
+    scale = km_per_deg_lon((lat + new_lat) / 2)
+    return new_lat, lon + (east_km / scale if scale else 0.0)
+
+
+def destination(lat: float, lon: float, bearing: float, km: float) -> tuple[float, float]:
+    """Point reached by travelling `km` along a compass bearing (0 = north)."""
+    t = math.radians(bearing)
+    return offset_km(lat, lon, km * math.cos(t), km * math.sin(t))
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two points, in km. ~0.5% off an ellipsoid,
+    far below the error from straight-line interpolation between GPS pings."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = (math.sin((p2 - p1) / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
+    return 2 * EARTH_KM * math.asin(math.sqrt(min(1.0, a)))
+
+
+def spiral_point(lat: float, lon: float, i: int, inner: float = 1.6, step: float = 1.15) -> tuple[float, float]:
+    """Place zone `i` on a phyllotactic spiral around a city centre. sqrt radius
+    keeps the points roughly equal-area instead of bunching near the middle."""
+    return destination(lat, lon, (i * GOLDEN_ANGLE) % 360.0, inner + step * math.sqrt(i))
+
+
+def sample_around(rng: random.Random, lat: float, lon: float, sigma_km: float, max_km: float) -> tuple[float, float]:
+    """Draw a point near a centre, gaussian in both axes, truncated at max_km.
+    Gaussian because businesses cluster on a high street and thin out."""
+    for _ in range(12):
+        n, e = rng.gauss(0, sigma_km), rng.gauss(0, sigma_km)
+        if math.hypot(n, e) <= max_km:
+            return offset_km(lat, lon, n, e)
+    # Fell through 12 draws. Clamp rather than return the exact centre, which
+    # would create an implausible pile-up on one coordinate.
+    return offset_km(lat, lon, max_km * 0.7, max_km * 0.7)
