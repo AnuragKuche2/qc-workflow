@@ -18,13 +18,25 @@ architecture and later sub-projects (B onward).
 ```bash
 cd qc-lakehouse
 make venv               # create the uv-managed .venv, pinned to Python 3.12
-make install-baseline   # ruff, pytest, python-dotenv
+make install             # installs everything already declared in pyproject.toml/uv.lock
 make check               # confirms the fast test suite is green so far
 
 brew install openjdk@17 # required by local Spark, not installable via uv
-make install-spark
+export JAVA_HOME=$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home
 make smoke-local         # local Spark + Delta round-trip, no Databricks needed yet
 ```
+
+`openjdk@17` is Homebrew keg-only - it is never symlinked into `/opt/homebrew`, so `java` and
+`JAVA_HOME` are not set up just by installing it. Add the `export JAVA_HOME=...` line above to
+your shell profile (`~/.zshrc` on a default macOS setup) rather than only running it once in
+your current terminal - a one-off `export` will not persist across new terminal sessions, and
+`make smoke-local` will fail with "JAVA_HOME is not set and no 'java' command could be found"
+the next time you open a fresh shell.
+
+`make install` runs `uv sync`, which installs exactly what `pyproject.toml`/`uv.lock` already
+declare with no mutation - the right choice for a clean clone. The `install-baseline`/
+`install-spark`/`install-dbt` Makefile targets still exist (they use `uv add`) but are only
+useful later, if you genuinely want to add a new dependency to the project.
 
 ## Databricks auth
 
@@ -39,9 +51,12 @@ make smoke-local         # local Spark + Delta round-trip, no Databricks needed 
 make install-databricks
 make smoke-databricks    # writes/reads a Delta table on serverless compute via Unity Catalog
 
-make install-dbt
 make smoke-dbt           # dbt debug + a trivial dbt run, same Databricks connection
 ```
+
+(`dbt-databricks` is already installed into `.venv` by `make install` above - there's no
+separate `make install-dbt` step needed here; that target only exists for adding a new
+dependency later.)
 
 Two things to know about this step:
 
@@ -53,6 +68,10 @@ Two things to know about this step:
   therefore runs with `.venv-databricks/bin/python` directly rather than `uv run` - that's
   expected, not a bug. You don't need to activate or manage `.venv-databricks` yourself;
   every `make` target that needs it already points at the right interpreter.
+  `install-databricks` pins exact `databricks-sdk`/`databricks-connect` versions in the
+  Makefile (matching what's confirmed working against Free Edition's serverless runtime), so
+  rebuilding `.venv-databricks` reproduces the same versions rather than drifting to whatever
+  resolves newest.
 - **You will be asked to log in twice, in two different browser windows.** The
   `databricks auth login` you ran above authenticates the Databricks CLI and Databricks
   Connect (used by `smoke-databricks`). dbt-databricks's `auth_type: oauth` keeps its own,

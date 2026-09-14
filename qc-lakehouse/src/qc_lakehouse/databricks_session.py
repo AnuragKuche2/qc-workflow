@@ -14,8 +14,18 @@ def ensure_schema_exists(session: SqlRunner, catalog: str, schema: str) -> None:
 
 
 def build_databricks_session(settings: Settings):
+    """Build a Databricks Connect serverless session for the workspace in `settings`.
+
+    The workspace host is passed explicitly via `.host(settings.databricks_host)` so the
+    session always connects to the workspace named by `settings`, regardless of what
+    Databricks profile or environment variables happen to be ambient. Do not rely on
+    `load_settings()`'s `load_dotenv()` side effect for this - it's no longer load-bearing
+    here.
+    """
     from databricks.connect import DatabricksSession
 
-    session = DatabricksSession.builder.serverless(True).getOrCreate()
+    session = (
+        DatabricksSession.builder.host(settings.databricks_host).serverless(True).getOrCreate()
+    )
     ensure_schema_exists(session, settings.databricks_catalog, settings.databricks_schema)
     return session

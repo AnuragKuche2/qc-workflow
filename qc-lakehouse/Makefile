@@ -1,9 +1,18 @@
-.PHONY: venv install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all
+.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all
 
 venv:
 	uv python pin 3.12
 	uv venv
 
+# Clean-clone install: installs exactly what pyproject.toml/uv.lock already declare, no
+# mutation. This is the primary documented setup step - see README.
+install:
+	uv sync
+
+# NOTE: install-baseline/install-spark/install-dbt use `uv add`, which re-resolves and can
+# mutate pyproject.toml/uv.lock. That's fine for adding a genuinely new dependency, but it's
+# the wrong tool for clean-clone setup (use `make install` instead) since it can leave a
+# fresh checkout with an unexpectedly dirty tree.
 install-baseline:
 	uv add --dev ruff pytest
 	uv add python-dotenv
@@ -18,10 +27,16 @@ install-spark:
 smoke-local:
 	uv run python scripts/smoke_local.py
 
+# Pinned to the exact databricks-connect/databricks-sdk versions confirmed working against
+# Databricks Free Edition's serverless runtime via the real smoke test (Task 6). The design
+# spec (docs/superpowers/specs/2026-09-14-qc-lakehouse-databricks-hero-design.md, section 6)
+# flagged this version as an open question to resolve during this sub-project rather than
+# leave floating. Bumping these versions should be a deliberate, tested decision - not an
+# incidental drift from an unpinned `uv pip install`.
 install-databricks:
 	uv venv .venv-databricks --python 3.12
 	uv pip install --python .venv-databricks/bin/python --no-deps -e .
-	uv pip install --python .venv-databricks/bin/python python-dotenv databricks-sdk databricks-connect
+	uv pip install --python .venv-databricks/bin/python python-dotenv "databricks-sdk==0.139.*" "databricks-connect==19.1.*"
 
 smoke-databricks:
 	.venv-databricks/bin/python scripts/smoke_databricks.py

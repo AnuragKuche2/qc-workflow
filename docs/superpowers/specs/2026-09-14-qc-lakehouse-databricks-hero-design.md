@@ -172,9 +172,12 @@ does not build pipeline or transformation logic - that's B and C.
 
 ## 6. Open questions for later sub-projects (not blocking A)
 
-- Exact `databricks-connect` version pin depends on the Free Edition workspace's current
+- ~~Exact `databricks-connect` version pin depends on the Free Edition workspace's current
   serverless runtime version at implementation time - confirm during A rather than pinning
-  here.
+  here.~~ **Resolved during A:** pinned to `databricks-connect==19.1.*` and
+  `databricks-sdk==0.139.*` in `qc-lakehouse/Makefile`'s `install-databricks` target - these
+  are the exact versions confirmed working against the Free Edition serverless runtime via
+  the real smoke test (Task 6). A future version bump should be a deliberate, tested change.
 - Whether Free Edition's Vector Search availability is sufficient for Sub-project D, or
   whether that sub-project needs a fallback (e.g. a Databricks-native alternative to FAISS
   using plain Delta + embeddings columns) - defer investigation to D's design.
