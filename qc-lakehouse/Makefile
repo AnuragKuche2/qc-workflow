@@ -1,4 +1,4 @@
-.PHONY: venv install-baseline check install-spark smoke-local
+.PHONY: venv install-baseline check install-spark smoke-local install-databricks smoke-databricks
 
 venv:
 	uv python pin 3.12
@@ -17,3 +17,9 @@ install-spark:
 
 smoke-local:
 	uv run python scripts/smoke_local.py
+
+install-databricks:
+	uv add databricks-sdk databricks-connect
+
+smoke-databricks:
+	uv run python scripts/smoke_databricks.py
