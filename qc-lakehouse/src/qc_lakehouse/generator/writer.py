@@ -65,6 +65,16 @@ def check_rider_capacity(riders, daily, max_deliveries_per_rider_per_day: int = 
     )
 
 
+def check_every_zone_has_an_active_rider(zones, riders) -> None:
+    """Every zone must have at least one active rider to actually fulfil an order in it.
+    build_restaurants guarantees `zcount = max(1, zcount)` so every zone gets a
+    restaurant, but build_riders has no equivalent floor - a small n_riders relative to
+    zone count could silently produce a zone with zero active riders."""
+    zones_with_active_rider = {r[4] for r in riders if r[6]}
+    dead_zones = [z[0] for z in zones if z[0] not in zones_with_active_rider]
+    assert not dead_zones, f"zones with no active rider: {dead_zones[:5]}"
+
+
 def _write(spark, config: GeneratorConfig, name: str, rows, schema) -> int:
     """Overwrite one Delta table. Idempotent: this is a full-table regeneration from a
     fixed seed, not an incremental append, so rerunning is safe."""
@@ -77,6 +87,10 @@ def _write(spark, config: GeneratorConfig, name: str, rows, schema) -> int:
 
 
 def write_reference_tables(spark, config: GeneratorConfig) -> dict[str, int]:
+    # ensure_schema_exists (reused from Sub-project A) only creates the schema, not the
+    # catalog - Sub-project A's own catalog already existed in that workspace, but a
+    # fresh Free Edition workspace won't have qc_dev.
+    spark.sql(f"CREATE CATALOG IF NOT EXISTS {config.catalog}")
     ensure_schema_exists(spark, config.catalog, config.schema)
 
     cities = build_cities(config)
@@ -91,6 +105,7 @@ def write_reference_tables(spark, config: GeneratorConfig) -> dict[str, int]:
     check_referential_integrity(zones, restaurants, riders, menu_items)
     check_demand_conservation(daily, hourly)
     check_rider_capacity(riders, daily)
+    check_every_zone_has_an_active_rider(zones, riders)
 
     counts: dict[str, int] = {}
     counts["cities"] = _write(spark, config, "cities", cities, CITIES_SCHEMA)

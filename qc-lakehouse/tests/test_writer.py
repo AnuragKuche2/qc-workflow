@@ -4,10 +4,13 @@ from decimal import Decimal
 
 import pytest
 
+from qc_lakehouse.generator.config import GeneratorConfig
 from qc_lakehouse.generator.writer import (
     check_demand_conservation,
+    check_every_zone_has_an_active_rider,
     check_referential_integrity,
     check_rider_capacity,
+    write_reference_tables,
 )
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -91,3 +94,62 @@ def test_check_rider_capacity_ignores_churned_riders():
         # part, only that it fails loudly rather than dividing silently by zero and
         # passing.
         check_rider_capacity(riders, daily, max_deliveries_per_rider_per_day=12)
+
+
+def test_check_every_zone_has_an_active_rider_passes_when_all_zones_are_covered():
+    zones = [_zone(1), _zone(2)]
+    riders = [_rider(1, zone_id=1), _rider(2, zone_id=2)]
+    check_every_zone_has_an_active_rider(zones, riders)  # must not raise
+
+
+def test_check_every_zone_has_an_active_rider_catches_a_zone_with_no_riders_at_all():
+    zones = [_zone(1), _zone(2)]
+    riders = [_rider(1, zone_id=1)]   # zone 2 has no rider of any kind
+    with pytest.raises(AssertionError, match="active rider"):
+        check_every_zone_has_an_active_rider(zones, riders)
+
+
+def test_check_every_zone_has_an_active_rider_catches_a_zone_with_only_churned_riders():
+    zones = [_zone(1), _zone(2)]
+    riders = [_rider(1, zone_id=1), _rider(2, zone_id=2, active=False)]   # zone 2's only rider is churned
+    with pytest.raises(AssertionError, match="active rider"):
+        check_every_zone_has_an_active_rider(zones, riders)
+
+
+class _NoWriteSpark:
+    """A fake Spark session that allows the DDL calls `write_reference_tables` makes
+    before its checks run (`ensure_schema_exists`, `CREATE CATALOG IF NOT EXISTS`), but
+    fails loudly if anything tries to actually write data. Used to prove the checks run
+    before any write - not just before the code that intentionally calls saveAsTable."""
+
+    def __init__(self):
+        self.sql_calls: list[str] = []
+
+    def sql(self, query: str):
+        self.sql_calls.append(query)
+        return self
+
+    def createDataFrame(self, *args, **kwargs):
+        raise RuntimeError("createDataFrame called - a write was attempted before checks passed")
+
+    def table(self, *args, **kwargs):
+        raise RuntimeError("table() called - a write was attempted before checks passed")
+
+
+def test_write_reference_tables_runs_checks_before_any_write():
+    # zones_per_city=15 with only 3 riders spreads them so thin (density is inner-heavy)
+    # that most zones get zero riders, guaranteeing check_every_zone_has_an_active_rider
+    # fails - deterministically, from a structural config choice, not a monkeypatch.
+    config = GeneratorConfig(
+        n_cities=1, zones_per_city=15, n_restaurants=10, n_riders=3,
+        n_customers=10, days=7, menu_items_per_restaurant=2,
+    )
+    spark = _NoWriteSpark()
+
+    with pytest.raises(AssertionError, match="active rider"):
+        write_reference_tables(spark, config)
+
+    # The only calls that reached the fake were schema/catalog DDL (spark.sql) - no
+    # createDataFrame/table (and therefore no saveAsTable) was ever invoked.
+    assert spark.sql_calls   # ensure_schema_exists + CREATE CATALOG did run
+    assert any("CREATE CATALOG" in q for q in spark.sql_calls)

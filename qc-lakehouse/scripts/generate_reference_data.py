@@ -18,6 +18,11 @@ from qc_lakehouse.generator.writer import write_reference_tables
 def main() -> None:
     settings = load_settings()
     spark = build_databricks_session(settings)
+    # build_databricks_session only establishes the Databricks Connect session; as a side
+    # effect it also creates/uses settings.databricks_catalog.settings.databricks_schema
+    # (typically workspace.dev) - Sub-project A's own throwaway smoke-test location. The
+    # actual write target for this script is GeneratorConfig's catalog/schema fields
+    # (qc_dev.bronze_source by default), which are independent of .env.
     config = GeneratorConfig()
 
     counts = write_reference_tables(spark, config)

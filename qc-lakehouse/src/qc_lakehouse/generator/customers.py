@@ -36,6 +36,15 @@ def build_customers(spark, config: GeneratorConfig, cities: list[tuple], zones: 
     from qc_lakehouse.generator.config import CITIES
     from qc_lakehouse.generator.math_utils import zone_density
 
+    # signup_ts below is built from a bare SQL timestamp literal (F.expr), which Spark
+    # parses in the SESSION's configured timezone - unlike every other table's
+    # timestamps, which come from tz-aware Python datetime objects and are correctly UTC
+    # regardless of session config. Without pinning this, the same seed/config on a
+    # differently-configured session produces a different signup_ts, which defeats the
+    # seeded generator. Must be set before the F.expr below is evaluated (i.e. before any
+    # action like .collect()/.count()), so it goes here, before the DataFrame chain.
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+
     start = date.fromisoformat(config.start_date)
     epoch = datetime.combine(start, datetime.min.time(), tzinfo=UTC)
     seed = config.seed

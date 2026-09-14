@@ -104,6 +104,9 @@ Sub-project A's own throwaway smoke-test tables).
 make generate-reference-data
 ```
 
+`make generate-reference-data` creates the `qc_dev` catalog and `bronze_source` schema
+automatically if they don't already exist - nothing needs to be pre-created by hand.
+
 This does not use Auto Loader - reference/dimension data is a one-time seed of the
 starting world, not a stream of arriving files, so Auto Loader's incremental-ingestion
 value doesn't apply here. Auto Loader is introduced in a later widen phase, for the
