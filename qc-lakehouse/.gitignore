@@ -1,0 +1,11 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+warehouse/
+dbt/qc_lakehouse/target/
+dbt/qc_lakehouse/dbt_packages/
+dbt/qc_lakehouse/logs/
+uv.lock.tmp
