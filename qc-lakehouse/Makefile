@@ -1,4 +1,4 @@
-.PHONY: venv install-baseline check
+.PHONY: venv install-baseline check install-spark smoke-local
 
 venv:
 	uv python pin 3.12
@@ -11,3 +11,9 @@ install-baseline:
 check:
 	uv run ruff check .
 	uv run pytest -q
+
+install-spark:
+	uv add pyspark delta-spark
+
+smoke-local:
+	uv run python scripts/smoke_local.py
