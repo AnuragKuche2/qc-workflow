@@ -1,4 +1,5 @@
 .venv/
+.venv-databricks/
 .env
 __pycache__/
 *.pyc

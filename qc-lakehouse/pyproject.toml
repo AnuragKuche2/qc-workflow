@@ -4,8 +4,6 @@ version = "0.1.0"
 description = "QC Lakehouse - Databricks + dbt hero quick-commerce data pipeline"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "databricks-connect>=19.1",
-    "databricks-sdk>=0.139.0",
     "delta-spark>=4.4.0",
     "pyspark>=4.2.0",
     "python-dotenv>=1.2.3",

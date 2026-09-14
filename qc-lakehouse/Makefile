@@ -19,7 +19,9 @@ smoke-local:
 	uv run python scripts/smoke_local.py
 
 install-databricks:
-	uv add databricks-sdk databricks-connect
+	uv venv .venv-databricks --python 3.12
+	uv pip install --python .venv-databricks/bin/python --no-deps -e .
+	uv pip install --python .venv-databricks/bin/python python-dotenv databricks-sdk databricks-connect
 
 smoke-databricks:
-	uv run python scripts/smoke_databricks.py
+	.venv-databricks/bin/python scripts/smoke_databricks.py
