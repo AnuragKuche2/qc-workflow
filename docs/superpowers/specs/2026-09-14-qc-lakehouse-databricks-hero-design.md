@@ -1,6 +1,6 @@
 # QC Lakehouse (Databricks-Hero) - Design
 
-**Status:** Approved for sub-project A. Sub-projects B-F are decomposed below but not yet individually designed.
+**Status:** Approved for sub-project A. Sub-projects B-G are decomposed below but not yet individually designed.
 
 ## 1. Background
 
@@ -34,10 +34,19 @@ pipeline is not "done" until both stories are demonstrable: a Databricks-native 
 story and a dbt-native transformation story with real tests and docs. Local tooling exists
 only to develop and smoke-test code before it runs for real on Databricks/dbt. Orchestration
 is external: a Dockerized Airflow instance triggers Databricks Jobs and dbt runs rather than
-Databricks Workflows or dbt Cloud orchestrating themselves.
+Databricks Workflows or dbt Cloud orchestrating themselves, and it only triggers the AI/RAG
+review-enrichment layer once ingestion and transformation are already flowing end to end -
+AI enrichment reads from already-built gold marts, it does not gate them.
+
+The explicit ambition is to end up with a more complete version of what
+`yt_transcript_01.md` / `yt_transcript_02.md` build (a Zomato-style "AI Data Analytics" data
+pipeline): the same quick-commerce domain, but with Databricks and dbt as genuine co-heroes,
+a structured AI review-issue layer, and a natural-language (text-to-SQL) analytics agent on
+top - capabilities the tutorial's own pipeline does not have.
 
 Build order follows a thin-spine-then-widen approach: get one table flowing end-to-end
-(generate -> ingest -> transform -> orchestrate) before adding breadth or the AI/RAG layer.
+(generate -> ingest -> transform -> orchestrate) before adding breadth, the AI review layer,
+or the text-to-SQL agent.
 
 ## 3. Constraints
 
@@ -67,12 +76,14 @@ when its turn comes. This document only fully specifies **Sub-project A**.
 | A | Foundation & Environment | - | venv, incremental deps, Databricks Free Edition + Unity Catalog setup, dbt-databricks connectivity, local + Databricks + dbt smoke tests |
 | B | Data generation & ingestion (bronze) | A | Quick-commerce synthetic generator; Auto Loader batch + streaming into Unity Catalog bronze |
 | C | Transformation (dbt-databricks medallion) | B | Full dbt project against Databricks serverless SQL warehouse: bronze->silver->gold, tests, docs, lineage - this is dbt's hero showcase |
-| D | AI/RAG layer | C | Claude-powered review enrichment, embeddings, Databricks Vector Search / AI Functions |
-| E | Orchestration | B, C (D once it exists) | Dockerized Airflow triggering Databricks Jobs for ingestion/dbt/AI tasks, retries/SLAs |
+| D | AI review-issue layer | C | Claude-powered review enrichment: classifies each review into structured issue categories (late delivery, food temperature, food quality/taste, wrong order, packaging, courier behavior, other/none), aggregable by restaurant, city, and cuisine; embeddings + Databricks Vector Search / AI Functions for retrieval |
+| E | Orchestration | B, C (D, G once they exist) | Dockerized Airflow triggering Databricks Jobs for ingestion/dbt/AI/text-to-SQL tasks, retries/SLAs |
 | F | Polish | A-E | CI (GitHub Actions), Free Edition credit/cost guardrails, README/narrative, optional Streamlit dashboard |
+| G | Text-to-SQL analytics agent | C (D optional, enriches answerable questions) | Custom Claude-based agent: natural-language question -> generated SQL -> executed against gold marts (and D's review-issue marts once they exist) -> answer. Own prompting/schema-context/validation, not Databricks Genie |
 
 MVP/Level 1 = a thin slice through A -> B -> C -> E: one bronze table, one dbt model,
-one Airflow DAG that successfully triggers a Databricks job. D layers on afterward.
+one Airflow DAG that successfully triggers a Databricks job. D and G layer on afterward, in
+either order, once C's gold marts exist.
 
 ## 5. Sub-project A: Foundation & Environment - detailed design
 
@@ -141,3 +152,6 @@ does not build pipeline or transformation logic - that's B and C.
 - Whether Free Edition's Vector Search availability is sufficient for Sub-project D, or
   whether that sub-project needs a fallback (e.g. a Databricks-native alternative to FAISS
   using plain Delta + embeddings columns) - defer investigation to D's design.
+- How Sub-project G's agent gets schema context (static schema dump vs. live `information_schema`
+  lookups vs. a fixed set of vetted query templates it fills in) and how generated SQL is
+  validated/sandboxed before execution against real gold marts - defer to G's design.
