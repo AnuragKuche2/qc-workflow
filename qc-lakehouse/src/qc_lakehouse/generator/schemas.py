@@ -90,3 +90,38 @@ DEMAND_HOURLY_SCHEMA = StructType([
     StructField("day_index", IntegerType()), StructField("order_date", DateType()),
     StructField("hour", IntegerType()), StructField("orders", IntegerType()),
 ])
+
+ORDERS_SCHEMA = StructType([
+    StructField("order_id", LongType()), StructField("order_ref", StringType()),
+    StructField("customer_id", LongType()), StructField("restaurant_id", LongType()),
+    StructField("zone_id", LongType()), StructField("placed_at", TS),
+    StructField("order_status", StringType()), StructField("subtotal", D2),
+    StructField("delivery_fee", D2), StructField("commission_pct", R5),
+    StructField("commission_amount", D2), StructField("order_total", D2),
+    StructField("delivery_notes", StringType()),
+])
+
+ORDER_ITEMS_SCHEMA = StructType([
+    StructField("order_item_id", LongType()), StructField("order_id", LongType()),
+    StructField("menu_item_id", LongType()), StructField("quantity", IntegerType()),
+    StructField("unit_price", D2), StructField("line_total", D2),
+])
+
+MATCH_ATTEMPTS_SCHEMA = StructType([
+    StructField("match_id", LongType()), StructField("order_id", LongType()),
+    StructField("rider_id", LongType()), StructField("attempt_number", IntegerType()),
+    StructField("offered_at", TS), StructField("response", StringType()),
+    StructField("responded_at", TS),
+])
+
+PAYMENTS_SCHEMA = StructType([
+    StructField("payment_id", LongType()), StructField("order_id", LongType()),
+    StructField("amount", D2), StructField("method", StringType()),
+    StructField("status", StringType()), StructField("paid_at", TS),
+])
+
+REFUNDS_SCHEMA = StructType([
+    StructField("refund_id", LongType()), StructField("order_id", LongType()),
+    StructField("payment_id", LongType()), StructField("refund_amount_raw", StringType()),
+    StructField("reason", StringType()), StructField("refunded_at", TS),
+])

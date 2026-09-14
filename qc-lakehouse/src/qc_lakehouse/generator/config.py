@@ -20,6 +20,15 @@ class GeneratorConfig:
     n_riders: int = 3_000
     n_customers: int = 300_000
     menu_items_per_restaurant: int = 25
+    cancel_rate: float = 0.06
+    unfulfilled_rate: float = 0.025
+    refund_rate: float = 0.028           # fraction of DELIVERED orders that also get a
+                                          # quality-issue refund
+    payment_failure_rate: float = 0.01
+    money_text_defect_rate: float = 0.15   # fraction of refunds using accounting-negative
+                                             # text formatting
+    text_noise_defect_rate: float = 0.08   # fraction of non-null delivery_notes with
+                                             # casing/whitespace mangling
 
 
 HISTORY_DAYS = 730   # entities were created in the 2 years BEFORE day 0

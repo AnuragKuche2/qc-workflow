@@ -65,3 +65,13 @@ def test_events_have_the_documented_eight_field_shape():
         assert isinstance(name, str)
         assert 0.0 <= position <= 1.0
         assert peak > 0
+
+
+def test_generator_config_fact_table_defaults():
+    config = GeneratorConfig()
+    assert config.cancel_rate == 0.06
+    assert config.unfulfilled_rate == 0.025
+    assert config.refund_rate == 0.028
+    assert config.payment_failure_rate == 0.01
+    assert config.money_text_defect_rate == 0.15
+    assert config.text_noise_defect_rate == 0.08
