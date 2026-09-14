@@ -11,3 +11,4 @@ dbt/qc_lakehouse/dbt_packages/
 dbt/qc_lakehouse/logs/
 dbt/qc_lakehouse/.user.yml
 uv.lock.tmp
+CACHEDIR.TAG
