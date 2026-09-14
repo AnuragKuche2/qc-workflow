@@ -1,6 +1,6 @@
 # QC Lakehouse (Databricks-Hero) - Design
 
-**Status:** Approved for sub-project A. Sub-projects B-H are decomposed below but not yet individually designed.
+**Status:** Approved for sub-project A (built and merged). Sub-project B's spine (reference-data layer only) is designed in section 6, pending review. Sub-projects C-H are decomposed below but not yet individually designed. Build order is fixed: A -> B -> C -> E -> H -> D -> G -> F (see section 4).
 
 ## 1. Background
 
@@ -83,7 +83,7 @@ when its turn comes. This document only fully specifies **Sub-project A**.
 | # | Sub-project | Depends on | One-line scope |
 |---|---|---|---|
 | A | Foundation & Environment | - | venv, incremental deps, Databricks Free Edition + Unity Catalog setup, dbt-databricks connectivity, local + Databricks + dbt smoke tests |
-| B | Data generation & ingestion (bronze) | A | Quick-commerce synthetic generator; Auto Loader batch + streaming into Unity Catalog bronze |
+| B | Data generation & ingestion (bronze) | A | Quick-commerce synthetic generator; Auto Loader batch + streaming into Unity Catalog bronze. **Spine (section 6) is reference-data only, direct-write to Delta, no Auto Loader** - fact tables (orders, events, GPS pings) and Auto Loader/streaming are a later widen step within B |
 | C | Transformation (dbt-databricks medallion) | B | Full dbt project against Databricks serverless SQL warehouse: bronze->silver->gold, tests, docs, lineage - this is dbt's hero showcase |
 | D | AI review-issue layer | C | Claude-powered review enrichment: classifies each review into structured issue categories (late delivery, food temperature, food quality/taste, wrong order, packaging, courier behavior, other/none), aggregable by restaurant, city, and cuisine; embeddings + Databricks Vector Search / AI Functions for retrieval |
 | E | Orchestration | B, C (D, G once they exist) | Dockerized Airflow triggering Databricks Jobs for ingestion/dbt/AI/text-to-SQL tasks, retries/SLAs |
@@ -93,8 +93,20 @@ when its turn comes. This document only fully specifies **Sub-project A**.
 
 MVP/Level 1 = a thin slice through A -> B -> C -> E: one bronze table, one dbt model,
 one Airflow DAG that successfully triggers a Databricks job, built idempotently from the
-start. D, G, and H layer on afterward, in any order, once C's gold marts exist and carry
-real data volume.
+start.
+
+**Chosen build order: A -> B -> C -> E -> H -> D -> G -> F.** Data-engineering-first: the
+core pipeline and its orchestration and performance/cost work (A-E, H) are built and proven
+before the AI review layer (D) and text-to-SQL agent (G). Two consequences of this order:
+
+- E is built against B/C only (its "(D, G once they exist)" scope does not apply yet). Once
+  D and G land, each gets a small follow-up touch to E's Airflow DAG to add their
+  triggers/retries - not a separate sub-project, just a short addition folded into D's and
+  G's own implementation steps.
+- F (Polish) moves to last, after G. This means F's "depends on A-E" scope is satisfied in
+  full (A-G are all done by then), so F becomes a single final polish pass - CI, cost
+  guardrails, README, optional dashboard - covering the whole system including the AI layer
+  and text-to-SQL agent, rather than needing to be split into two passes.
 
 **H's scope in more detail** (deferred to H's own design pass, noted now so it isn't lost):
 - Layout comparison on a table with enough rows that file-skipping differences are actually
@@ -170,7 +182,124 @@ Docker, and the AI/RAG layer are not part of A. A proves the toolchain and all t
 execution paths (local Spark dev-loop, Databricks compute, dbt-against-Databricks) work; it
 does not build pipeline or transformation logic - that's B and C.
 
-## 6. Open questions for later sub-projects (not blocking A)
+## 6. Sub-project B: Data generation & ingestion (bronze) - detailed design (spine only)
+
+### 6.1 Background
+
+A prior planning pass (independent of this spec, done directly in a Databricks notebook -
+`QuickcommerceV2N1.html`, exported from the workspace) already built and validated the
+reference-data half of the generator: cities, zones, restaurants, riders, menu items,
+customers, rider payout tiers, and a demand curve (daily/hourly order counts, event spikes,
+day-of-week seasonality). That notebook does **not** generate orders, `order_events`,
+`courier_shifts`, or `gps_pings` - a comment in it says explicitly "notebook 02 reads these
+tables."
+
+The notebook's domain logic and math were reviewed and found to be genuinely strong: correct
+largest-remainder allocation for exact-sum splits, `Decimal`-based money handling, proper
+latitude-adjusted geographic math, deliberately shuffled Zipf popularity (so restaurant
+popularity is uncorrelated with `restaurant_id`, which matters for H's later file-layout
+benchmarks), and generator-only columns split from source-visible columns. It is, however,
+notebook-shaped: global mutable state built across cell-execution order, zero automated
+tests, `print`-based sanity checks that never fail the run even when they detect a real
+problem, and hardcoded config at module scope.
+
+**Sub-project B's spine is a faithful port of this reference-data layer into tested
+`qc_lakehouse` code**, not a rewrite of the domain logic and not an expansion to the
+order/event/GPS layer - that is explicitly deferred (see 6.4).
+
+### 6.2 Scope decisions
+
+- **Reference layer only.** Orders, `order_events`, `courier_shifts`, `gps_pings` are out of
+  scope for B's spine - they are the next widen step (a follow-up sub-project or a later part
+  of B), and they are exactly the tables that will actually justify Auto Loader and streaming.
+- **No Auto Loader for this layer.** Reference/dimension data is a one-time seed of the
+  world's starting state, not a stream of arriving files - Auto Loader's incremental
+  file-discovery value doesn't apply here. These tables are written directly to Delta
+  (`spark.createDataFrame(...).write.saveAsTable(...)`), matching what the notebook already
+  does. Auto Loader is introduced later, for the fact tables, where it earns its keep.
+- **Runs via Databricks Connect from local**, reusing `build_databricks_session()` from
+  Sub-project A (Task 6) exactly as-is - no new deployment mechanism. When Sub-project E
+  (Orchestration) exists, Airflow triggers this same script as a job step; B does not need to
+  solve Databricks Job packaging/deployment itself.
+- **Faithful port + targeted fixes**, not a rewrite:
+  - Domain logic, distributions, and constants are carried over as-is - they are already
+    correct and were already empirically tuned (several comments in the source notebook
+    record specific earlier bugs and their fixes, e.g. rider counts, SLA ladder minutes,
+    festival date placement).
+  - Fixed: every pure function (no Spark dependency) gets real `pytest` coverage -
+    `allocate`, `stream_seed`, `zipf`, `haversine_km`, `offset_km`, `destination`,
+    `spiral_point`, `sample_around`, `zone_density`, `pick`, `day_factors`,
+    `orders_by_hour`, `events_on`.
+  - Fixed: the notebook's `print`-based sanity checks (hour/day conservation, referential
+    integrity, rider capacity) become real `assert` statements that fail the run - the
+    notebook's own comment says a conservation failure "would be losing cents in the
+    payouts," which is a hard-failure condition, not a print-and-hope one.
+  - Fixed: `CATALOG`/`SCHEMA`/`DAYS`/`SEED`/etc. move from hardcoded module-level constants
+    to a `GeneratorConfig` dataclass, constructed with the notebook's current values as
+    defaults but overridable.
+  - **Not fixed (deferred):** positional tuple/list entity records (e.g. `restaurants.append([...])`,
+    accessed later as `r[14]`, `r[:14]`) stay as-is. A dataclass/namedtuple refactor is real
+    and worth doing, but it touches every generation function and is explicitly out of scope
+    for this port - revisit if/when the positional-index fragility actually causes a bug.
+- **Where data lands:** catalog `qc_dev`, schema `bronze_source` - matches the notebook's own
+  naming, and keeps real pipeline data cleanly separate from Sub-project A's throwaway
+  `workspace.dev` smoke-test tables (which must never be treated as pipeline data, per A's
+  Global Constraints).
+
+### 6.3 File structure
+
+```
+qc-lakehouse/src/qc_lakehouse/generator/
+  __init__.py
+  math_utils.py     # pure functions: allocate, stream_seed, zipf, haversine_km, offset_km,
+                     # destination, spiral_point, sample_around, zone_density, pick,
+                     # day_factors, orders_by_hour, events_on - zero Spark dependency
+  config.py          # GeneratorConfig dataclass (DAYS, ORDERS_PER_DAY, SEED, START_DATE,
+                      # N_CITIES, ZONES_PER_CITY, N_RESTAURANTS, N_RIDERS, N_CUSTOMERS,
+                      # MENU_ITEMS_PER_RESTAURANT) + static catalogs (CITIES, ZONE_NAMES,
+                      # CUISINES, BRAND_PREFIX, BRAND_CORE, MENUS, VEHICLE_MIX, TIER_MIX,
+                      # TIER_RATES, EVENTS)
+  entities.py         # non-Spark entity builders: build_cities, build_zones,
+                       # build_restaurants, build_riders, build_menu_items,
+                       # build_payout_tiers, build_demand_curve
+  customers.py          # the one Spark-dependent generation piece (the ~300k-row customer
+                         # DataFrame pipeline: broadcast-join zone bucketing, hash-based
+                         # deterministic field derivation)
+  schemas.py             # StructType definitions, one per table
+  writer.py               # orchestrates: build everything, write to qc_dev.bronze_source,
+                           # run the (now real) integrity/conservation assertions
+
+qc-lakehouse/scripts/generate_reference_data.py   # entrypoint: load_settings() +
+                                                    # build_databricks_session() + call
+                                                    # generator.writer, mirrors the shape of
+                                                    # scripts/smoke_databricks.py from A
+
+qc-lakehouse/tests/test_math_utils.py              # real pytest coverage for every pure
+                                                     # function in math_utils.py - runs in
+                                                     # the fast make check suite, no Spark,
+                                                     # no live Databricks needed
+```
+
+### 6.4 Explicitly out of scope for B's spine
+
+Orders, `order_events`, `courier_shifts`, `gps_pings`, Auto Loader (batch or streaming), and
+any dbt/transformation work are not part of this pass. This is the reference/dimension layer
+only. The fact-table layer (which is where Auto Loader, streaming, and higher data volume
+actually apply) is deliberately deferred to a widen step once this spine is proven working
+end to end - matching the project's thin-spine-then-widen philosophy.
+
+### 6.5 Success criteria
+
+- `qc-lakehouse/scripts/generate_reference_data.py` run against live Databricks Free Edition
+  produces all reference tables in `qc_dev.bronze_source`, matching the notebook's original
+  row counts and summary output.
+- The integrity/conservation checks that used to be `print` statements now genuinely fail the
+  run (non-zero exit / raised exception) if violated - proven by at least one test that
+  deliberately breaks an invariant and confirms the run fails.
+- `make check` gains real, fast, Spark-free unit test coverage for every pure function in
+  `math_utils.py`.
+
+## 7. Open questions for later sub-projects (not blocking A or B)
 
 - ~~Exact `databricks-connect` version pin depends on the Free Edition workspace's current
   serverless runtime version at implementation time - confirm during A rather than pinning
