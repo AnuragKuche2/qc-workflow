@@ -23,13 +23,18 @@ as the dataset shape.
 
 ## 2. Goal
 
-Build an open-source-flavored, portfolio-quality quick-commerce delivery data pipeline where
-**Databricks is the hero**: ingestion, transformation, and AI/RAG enrichment all execute as
-Databricks jobs on serverless compute, using Databricks-proprietary features (Unity Catalog,
-Auto Loader, Delta Live Tables/Lakeflow, Photon, Vector Search, AI Functions) wherever they
-add real value. Local tooling exists only to develop and smoke-test code before it runs for
-real on Databricks. Orchestration is external: a Dockerized Airflow instance triggers
-Databricks Jobs rather than Databricks Workflows orchestrating itself.
+Build an open-source-flavored, portfolio-quality quick-commerce delivery data pipeline with
+**two co-heroes: Databricks and dbt.** Databricks is the compute engine - ingestion and AI/RAG
+enrichment execute as Databricks jobs on serverless compute, using Databricks-proprietary
+features (Unity Catalog, Auto Loader, Delta Live Tables/Lakeflow, Photon, Vector Search, AI
+Functions) wherever they add real value. dbt (`dbt-databricks`) is the transformation engine -
+it owns the entire bronze->silver->gold medallion build, including tests, documentation, and
+lineage, rather than being one option among several ways the pipeline could shape data. A
+pipeline is not "done" until both stories are demonstrable: a Databricks-native ingestion/AI
+story and a dbt-native transformation story with real tests and docs. Local tooling exists
+only to develop and smoke-test code before it runs for real on Databricks/dbt. Orchestration
+is external: a Dockerized Airflow instance triggers Databricks Jobs and dbt runs rather than
+Databricks Workflows or dbt Cloud orchestrating themselves.
 
 Build order follows a thin-spine-then-widen approach: get one table flowing end-to-end
 (generate -> ingest -> transform -> orchestrate) before adding breadth or the AI/RAG layer.
@@ -59,9 +64,9 @@ when its turn comes. This document only fully specifies **Sub-project A**.
 
 | # | Sub-project | Depends on | One-line scope |
 |---|---|---|---|
-| A | Foundation & Environment | - | venv, incremental deps, Databricks Free Edition + Unity Catalog setup, local + Databricks smoke tests |
+| A | Foundation & Environment | - | venv, incremental deps, Databricks Free Edition + Unity Catalog setup, dbt-databricks connectivity, local + Databricks + dbt smoke tests |
 | B | Data generation & ingestion (bronze) | A | Quick-commerce synthetic generator; Auto Loader batch + streaming into Unity Catalog bronze |
-| C | Transformation (dbt-databricks medallion) | B | dbt project against Databricks serverless SQL warehouse, bronze->silver->gold |
+| C | Transformation (dbt-databricks medallion) | B | Full dbt project against Databricks serverless SQL warehouse: bronze->silver->gold, tests, docs, lineage - this is dbt's hero showcase |
 | D | AI/RAG layer | C | Claude-powered review enrichment, embeddings, Databricks Vector Search / AI Functions |
 | E | Orchestration | B, C (D once it exists) | Dockerized Airflow triggering Databricks Jobs for ingestion/dbt/AI tasks, retries/SLAs |
 | F | Polish | A-E | CI (GitHub Actions), Free Edition credit/cost guardrails, README/narrative, optional Streamlit dashboard |
@@ -78,9 +83,10 @@ qc-lakehouse/
   pyproject.toml          # uv-managed, pinned Python 3.12
   .python-version
   .env.example            # DATABRICKS_HOST, DATABRICKS_CATALOG, etc - .env itself gitignored
-  Makefile                # make venv / make smoke-local / make smoke-databricks
+  Makefile                # make venv / make smoke-local / make smoke-databricks / make smoke-dbt
   conf/spark-local.conf   # minimal local Spark+Delta conf, no metastore wiring
   src/qc_lakehouse/       # shared python package (config, session helpers)
+  dbt/qc_lakehouse/       # dbt project scaffold (profiles.yml via env vars, no models yet)
   tests/
   README.md
 ```
@@ -104,20 +110,28 @@ than all at once:
 5. Databricks smoke test: a script using
    `DatabricksSession.builder.serverless(True).getOrCreate()` that creates a Unity Catalog
    catalog/schema if needed, then writes and reads back a Delta table on serverless compute.
+6. dbt tooling: `uv pip install dbt-databricks`, then an empty `dbt/qc_lakehouse` project
+   scaffolded via `dbt init` with `profiles.yml` pointed at the same Databricks serverless SQL
+   warehouse (credentials from the same `.env` used in step 4/5, no separate auth story).
+   Smoke test is `dbt debug` passing, plus a single trivial seed or `select 1` model run via
+   `dbt run` to prove dbt can actually execute against Databricks end to end - not just
+   authenticate.
 
 ### 5.3 Success criteria
 
-- `make smoke-local` and `make smoke-databricks` both run green from a clean clone in under a
-  few minutes.
-- `.env.example` documents every required variable; `.env` itself is gitignored.
-- Databricks auth is reproducible by another machine following the README (no hardcoded
-  tokens or workspace-specific paths).
+- `make smoke-local`, `make smoke-databricks`, and `make smoke-dbt` all run green from a clean
+  clone in under a few minutes.
+- `.env.example` documents every required variable (shared between Databricks Connect and
+  dbt's `profiles.yml`); `.env` itself is gitignored.
+- Databricks auth and dbt connectivity are both reproducible by another machine following the
+  README (no hardcoded tokens or workspace-specific paths).
 
 ### 5.4 Explicitly out of scope for A
 
-Real data generation, dbt, Airflow/Docker, and the AI/RAG layer are not part of A. A proves
-the toolchain and both compute paths (local dev-loop, Databricks real path) work; it does not
-build pipeline logic.
+Real data generation, real dbt models (the bronze->silver->gold medallion build), Airflow/
+Docker, and the AI/RAG layer are not part of A. A proves the toolchain and all three
+execution paths (local Spark dev-loop, Databricks compute, dbt-against-Databricks) work; it
+does not build pipeline or transformation logic - that's B and C.
 
 ## 6. Open questions for later sub-projects (not blocking A)
 
