@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Sequence
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 
@@ -110,3 +111,63 @@ def sample_around(rng: random.Random, lat: float, lon: float, sigma_km: float, m
     # Fell through 12 draws. Clamp rather than return the exact centre, which
     # would create an implausible pile-up on one coordinate.
     return offset_km(lat, lon, max_km * 0.7, max_km * 0.7)
+
+
+def resolve_events(events: Sequence, days: int) -> list[tuple[int, tuple]]:
+    """Pick which EVENTS actually land in a `days`-long window, spaced out and deduplicated
+    by day index. `wanted` scales with the window length so the same catalogue works at
+    7 days or 365."""
+    wanted = max(1, round(days / 90 * 4))
+    resolved: list[tuple[int, tuple]] = []
+    for ev in events[:wanted]:
+        day_index = round(ev[1] * (days - 1))
+        if day_index not in [d for d, _ in resolved]:
+            resolved.append((day_index, ev))
+    return resolved
+
+
+def events_on(day_index: int, resolved_events, shoulder_before: float, shoulder_after: float):
+    """Events touching this day, each with its share of the boost."""
+    out = []
+    for d, ev in resolved_events:
+        offset = day_index - d
+        if offset == 0:
+            out.append((ev, 1.0))
+        elif offset == -1:
+            out.append((ev, shoulder_before))
+        elif offset == 1:
+            out.append((ev, shoulder_after))
+    return out
+
+
+def day_factors(day_index: int, start_date: date, dow_weights, resolved_events, noise,
+                 orders_per_day: int, shoulder_before: float, shoulder_after: float):
+    """Every input to one day's order count, kept separable so it can be audited."""
+    d = start_date + timedelta(days=day_index)
+    dow = dow_weights[d.weekday()]
+    event, names = 1.0, []
+    for ev, share in events_on(day_index, resolved_events, shoulder_before, shoulder_after):
+        event *= 1.0 + (ev[2] - 1.0) * share
+        names.append(ev[0])
+    n = noise[day_index]
+    total = dow * event * n
+    return d, d.weekday(), dow, event, n, total, max(1, round(orders_per_day * total)), names
+
+
+def orders_by_hour(day_index: int, start_date: date, dow_weights, resolved_events, noise,
+                    orders_per_day: int, hourly_weekday, hourly_weekend,
+                    shoulder_before: float, shoulder_after: float) -> list[int]:
+    """Split the day's orders across 24 hours, summing EXACTLY to the day total.
+    Rounding 24 hours independently loses orders the way naive rounding loses cents."""
+    _, weekday, *_, orders, _ = day_factors(
+        day_index, start_date, dow_weights, resolved_events, noise, orders_per_day,
+        shoulder_before, shoulder_after,
+    )
+    weights = list(hourly_weekend if weekday >= 5 else hourly_weekday)
+    for ev, share in events_on(day_index, resolved_events, shoulder_before, shoulder_after):
+        if ev[3] and ev[4] != 1.0:
+            lo, hi = ev[3]
+            for h in range(lo, hi + 1):
+                weights[h % 24] *= 1.0 + (ev[4] - 1.0) * share
+    parts = allocate(Decimal(orders), [Decimal(str(w)) for w in weights], 0)
+    return [int(p) for p in parts]

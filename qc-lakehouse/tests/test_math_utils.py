@@ -1,13 +1,18 @@
 import random
+from datetime import date
 from decimal import Decimal
 
 from qc_lakehouse.generator.math_utils import (
     allocate,
+    day_factors,
     destination,
+    events_on,
     haversine_km,
     km_per_deg_lon,
     offset_km,
+    orders_by_hour,
     pick,
+    resolve_events,
     sample_around,
     spiral_point,
     split_by_share,
@@ -126,3 +131,59 @@ def test_sample_around_stays_within_max_km():
     for _ in range(50):
         lat, lon = sample_around(rng, lat0, lon0, sigma_km=0.7, max_km=2.0)
         assert haversine_km(lat0, lon0, lat, lon) <= 2.0 + 1e-6
+
+
+TEST_EVENTS = [
+    ("sports_final", 0.13, 1.80, (18, 22), 2.2, 1.0, 1.0, 1.0),
+    ("storm", 0.38, 1.45, None, 1.0, 1.40, 1.60, 2.5),
+    ("festival", 0.66, 2.10, None, 1.0, 1.0, 1.0, 1.0),
+    ("long_weekend", 0.87, 1.30, None, 1.0, 1.0, 1.0, 1.0),
+]
+TEST_DOW = [0.85, 0.82, 0.90, 1.10, 1.35, 1.45, 1.20]
+TEST_DOW = [m / (sum(TEST_DOW) / 7) for m in TEST_DOW]
+
+
+def test_resolve_events_scales_count_with_window_length():
+    short = resolve_events(TEST_EVENTS, days=7)
+    long = resolve_events(TEST_EVENTS, days=90)
+    assert len(short) <= len(long)
+    assert len(long) == 4    # max(1, round(90/90*4)) == 4, all events fit
+
+
+def test_resolve_events_deduplicates_by_day_index():
+    resolved = resolve_events(TEST_EVENTS, days=90)
+    day_indices = [d for d, _ in resolved]
+    assert len(day_indices) == len(set(day_indices))
+
+
+def test_events_on_gives_shoulder_days_partial_share():
+    resolved = [(10, TEST_EVENTS[0])]
+    assert events_on(10, resolved, shoulder_before=0.30, shoulder_after=0.50) == [(TEST_EVENTS[0], 1.0)]
+    assert events_on(9, resolved, shoulder_before=0.30, shoulder_after=0.50) == [(TEST_EVENTS[0], 0.30)]
+    assert events_on(11, resolved, shoulder_before=0.30, shoulder_after=0.50) == [(TEST_EVENTS[0], 0.50)]
+    assert events_on(12, resolved, shoulder_before=0.30, shoulder_after=0.50) == []
+
+
+def test_day_factors_event_day_has_higher_total_than_non_event_day():
+    resolved = [(10, TEST_EVENTS[2])]  # festival, peak=2.10
+    noise = [1.0] * 20
+    non_event = day_factors(0, date(2026, 6, 1), TEST_DOW, resolved, noise, 15_000, 0.30, 0.50)
+    event_day = day_factors(10, date(2026, 6, 1), TEST_DOW, resolved, noise, 15_000, 0.30, 0.50)
+    assert event_day[6] > non_event[6]    # index 6 is the resolved order count
+    assert "festival" in event_day[7]
+
+
+def test_orders_by_hour_sums_exactly_to_the_day_total():
+    resolved = resolve_events(TEST_EVENTS, days=90)
+    noise = [1.0] * 90
+    hourly_weekday = [1 / 24] * 24
+    hourly_weekend = [1 / 24] * 24
+    for day_index in range(90):
+        _, _weekday, *_, orders, _ = day_factors(
+            day_index, date(2026, 6, 1), TEST_DOW, resolved, noise, 15_000, 0.30, 0.50
+        )
+        hours = orders_by_hour(
+            day_index, date(2026, 6, 1), TEST_DOW, resolved, noise, 15_000,
+            hourly_weekday, hourly_weekend, 0.30, 0.50,
+        )
+        assert sum(hours) == orders, f"day {day_index}: hours sum to {sum(hours)}, expected {orders}"
