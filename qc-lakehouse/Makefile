@@ -1,4 +1,4 @@
-.PHONY: venv install-baseline check install-spark smoke-local install-databricks smoke-databricks
+.PHONY: venv install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt
 
 venv:
 	uv python pin 3.12
@@ -25,3 +25,11 @@ install-databricks:
 
 smoke-databricks:
 	.venv-databricks/bin/python scripts/smoke_databricks.py
+
+install-dbt:
+	uv add dbt-databricks
+	uv add --dev pyyaml
+
+smoke-dbt:
+	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt debug --project-dir dbt/qc_lakehouse
+	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt run --project-dir dbt/qc_lakehouse --select hello_dbt
