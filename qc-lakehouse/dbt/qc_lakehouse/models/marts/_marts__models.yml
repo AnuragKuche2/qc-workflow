@@ -23,3 +23,23 @@ models:
       - name: rider_id
         description: Primary key.
         tests: [unique, not_null]
+
+  - name: dim_zone
+    description: Zone dimension, with city attributes folded in directly.
+    columns:
+      - name: zone_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: city_id
+        tests: [not_null]
+
+  - name: dim_date
+    description: >
+      Date dimension covering the generator's demand window, one row per date, derived
+      directly from stg_demand_daily.
+    columns:
+      - name: date_day
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: is_weekend
+        tests: [not_null]
