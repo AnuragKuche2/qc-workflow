@@ -1,8 +1,10 @@
 # qc-lakehouse/src/qc_lakehouse/generator/fact_entities.py
 from __future__ import annotations
 
-from pyspark.sql import Window
+import bisect
+
 from pyspark.sql import functions as F
+from pyspark.sql.types import LongType
 
 from qc_lakehouse.generator.config import GeneratorConfig
 
@@ -14,14 +16,30 @@ def _h(col, salt: int):
     return F.pmod(F.hash(col, F.lit(salt)), F.lit(1_000_000)) / 1_000_000.0
 
 
-def _bucket(df, cum_df, draw_col: str):
-    """Assigns each row of `df` to the smallest bucket in `cum_df` (a `cum` column of
-    ascending cumulative thresholds) whose threshold clears `draw_col` - the same
-    inverse-CDF pattern customers.py uses for zone assignment, generalized to any
-    cumulative-weight table."""
-    joined = df.join(F.broadcast(cum_df), df[draw_col] <= cum_df["cum"], "left")
-    w = Window.partitionBy("order_id").orderBy("cum")
-    return joined.withColumn("rn", F.row_number().over(w)).filter("rn = 1").drop("rn", "cum", draw_col)
+def _weighted_pick_udf(cum_pairs: list[tuple[int, float]]):
+    """cum_pairs: (id, cumulative_threshold) tuples, already sorted ascending by threshold,
+    last threshold ~1.0. Returns a Spark UDF mapping a uniform [0,1) draw to the id of the
+    smallest threshold that clears it.
+
+    This replaces an earlier broadcast-inequality-join approach (`draw_col <= cum`, picking
+    the top-1 by a window function). That join has no equality predicate, so Spark plans it
+    as a BroadcastNestedLoopJoin: O(rows_left * rows_right) pairwise evaluations. At
+    production GeneratorConfig defaults that's ~1.35M orders x 300,000 customers for the
+    customer-weighting step alone - on the order of 4x10^11 pairwise evaluations before the
+    window-based top-1 filter even runs, a serious risk of timing out or failing outright on
+    a live Databricks run. A driver-side binary search via bisect is O(log n) per row and
+    needs no join at all - the cumulative table only has to exist once, broadcast as a
+    Python closure captured in the UDF, not as a Spark DataFrame."""
+    ids = [p[0] for p in cum_pairs]
+    thresholds = [p[1] for p in cum_pairs]
+
+    def pick(draw: float) -> int:
+        idx = bisect.bisect_left(thresholds, draw)
+        if idx >= len(ids):
+            idx = len(ids) - 1
+        return ids[idx]
+
+    return F.udf(pick, LongType())
 
 
 def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaurant_profile_df,
@@ -59,10 +77,13 @@ def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaur
         .select("order_id", "day_index", "order_date", "hour")
     )
 
-    # Restaurant popularity and customer order-propensity: same cumulative-threshold
-    # broadcast-join bucketing customers.py uses for zone assignment. Both reference
-    # tables are small enough (thousands / low hundred-thousands of rows) to collect and
-    # prefix-sum driver-side in well under a second.
+    # Restaurant popularity and customer order-propensity: cumulative-threshold inverse-CDF
+    # bucketing, same idea customers.py uses for zone assignment, but resolved via a
+    # driver-side binary search UDF (see _weighted_pick_udf) rather than a broadcast join -
+    # a broadcast INEQUALITY join here would plan as a BroadcastNestedLoopJoin
+    # (O(rows_left * rows_right), infeasible at production order-count x customer-count
+    # scale). Both reference tables are small enough (thousands / low hundred-thousands of
+    # rows) to collect and prefix-sum driver-side in well under a second.
     #
     # Weights are normalized by their own sum before accumulating, so the cumulative
     # thresholds always land in [0, 1] - the same range as the uniform draw in `_h`.
@@ -73,28 +94,34 @@ def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaur
     # past 1 after just the first one or two customer_ids, and since every draw is < 1,
     # bucketing would always resolve to whichever of those first few ids has the smallest
     # cum that still clears the draw. Concretely: every order collapses onto customer_id 1.
-    def _cumulative(rows, id_field, weight_field, out_schema):
+    def _cumulative(rows, id_field, weight_field) -> list[tuple[int, float]]:
         rows = sorted(rows, key=lambda r: r[id_field])
         total = sum(row[weight_field] for row in rows)
         cum, out = 0.0, []
         for row in rows:
             cum += row[weight_field] / total
             out.append((row[id_field], cum))
-        return spark.createDataFrame(out, out_schema)
+        return out
 
-    restaurant_cum_df = _cumulative(
+    restaurant_cum = _cumulative(
         restaurant_profile_df.select("restaurant_id", "popularity_weight").collect(),
-        "restaurant_id", "popularity_weight", "restaurant_id long, cum double",
+        "restaurant_id", "popularity_weight",
     )
-    customer_cum_df = _cumulative(
+    customer_cum = _cumulative(
         customer_profile_df.select("customer_id", "order_propensity").collect(),
-        "customer_id", "order_propensity", "customer_id long, cum double",
+        "customer_id", "order_propensity",
     )
+    restaurant_pick_udf = _weighted_pick_udf(restaurant_cum)
+    customer_pick_udf = _weighted_pick_udf(customer_cum)
 
-    orders = exploded.withColumn("u_restaurant", _h(F.col("order_id"), seed + 101))
-    orders = _bucket(orders, restaurant_cum_df.withColumnRenamed("restaurant_id", "restaurant_id"), "u_restaurant")
-    orders = orders.withColumn("u_customer", _h(F.col("order_id"), seed + 102))
-    orders = _bucket(orders, customer_cum_df.withColumnRenamed("customer_id", "customer_id"), "u_customer")
+    orders = (
+        exploded
+        .withColumn("u_restaurant", _h(F.col("order_id"), seed + 101))
+        .withColumn("restaurant_id", restaurant_pick_udf(F.col("u_restaurant")))
+        .withColumn("u_customer", _h(F.col("order_id"), seed + 102))
+        .withColumn("customer_id", customer_pick_udf(F.col("u_customer")))
+        .drop("u_restaurant", "u_customer")
+    )
 
     orders = (
         orders
