@@ -152,6 +152,10 @@ def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaur
         ),
     )
 
+    # stg_orders.sql recovers these from the text-noise defect via a first-letter-upper/
+    # rest-lower transform, which only reconstructs the exact original casing for plain
+    # sentence-case text (no internal capitals, e.g. no acronyms). Adding a phrase that
+    # breaks that assumption needs a matching update to stg_orders' accepted_values test.
     notes_pool = [
         "Ring the bell twice", "Leave at the door", "Call on arrival",
         "No onions please", "Extra spicy", "Gate code 1234",

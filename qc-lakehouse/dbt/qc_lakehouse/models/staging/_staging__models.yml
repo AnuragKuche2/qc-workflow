@@ -181,6 +181,25 @@ models:
         tests: [not_null]
       - name: order_total
         tests: [not_null]
+      - name: delivery_notes
+        description: >
+          Recovered from the text-noise defect via a first-letter-upper/rest-lower
+          transform, which only reconstructs the exact original casing because every phrase
+          in the generator's notes_pool (fact_entities.py) is plain sentence-case with no
+          internal capitals. This test pins the closed vocabulary so a future notes_pool
+          phrase with an internal capital (e.g. an acronym) fails loudly here instead of
+          silently landing with the wrong casing.
+        tests:
+          - accepted_values:
+              values:
+                - 'Ring the bell twice'
+                - 'Leave at the door'
+                - 'Call on arrival'
+                - 'No onions please'
+                - 'Extra spicy'
+                - 'Gate code 1234'
+              config:
+                where: "delivery_notes is not null"
       - name: was_text_noise_defect
         description: >
           Flags rows where delivery_notes had the deliberate text-noise defect
