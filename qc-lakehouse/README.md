@@ -137,3 +137,31 @@ there deliberately, for Sub-project C's dbt staging models to clean.
 
 No Auto Loader here either - still a from-scratch generation run, direct-write to Delta.
 Idempotent the same way the reference layer is: `mode("overwrite")` from a fixed seed.
+
+## dbt medallion transformation (Sub-project C)
+
+Full bronze -> silver -> gold dbt project against `qc_dev.bronze_source`, per
+`docs/superpowers/specs/2026-09-14-qc-lakehouse-databricks-hero-design.md` section 8.
+
+- **Silver** (`qc_dev.silver`): 14 staging models (1:1 with each bronze source, type
+  casting), plus 2 intermediate models for cross-table logic. Cleans both of W1a's
+  deliberate defects (`stg_orders`'s text-noise mangling, `stg_refunds`'s money-as-text
+  formatting - both flagged via a `was_*_defect` boolean column for auditability) and masks
+  customer PII (`stg_customers`: email one-way hashed, phone partially masked).
+- **Gold** (`qc_dev.gold`): a proper dimensional model - `dim_customer`, `dim_restaurant`,
+  `dim_rider`, `dim_zone`, `dim_date`, plus `fct_orders` (order economics) and
+  `fct_deliveries` (match/courier-assignment operations - deliberately NOT a full
+  delivery-SLA fact, since no delivery-completion timestamp exists in bronze data yet).
+- **Testing**: generic dbt tests (not_null/unique/relationships/accepted_values) on every
+  model, plus 3 custom singular SQL tests re-implementing the money-chain invariants
+  `fact_writer.py` already checks in Python - the same invariants verified independently by
+  two different tools at two different layers.
+
+```bash
+make dbt-run    # builds every silver + gold model against qc_dev
+make dbt-test   # runs every generic + custom test
+make dbt-docs   # generates the browsable docs site + lineage DAG
+```
+
+Requires `make generate-reference-data` and `make generate-fact-data` to have been run first
+(dbt only reads `qc_dev.bronze_source`, never writes to it).
