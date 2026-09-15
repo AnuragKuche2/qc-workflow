@@ -1,5 +1,6 @@
 .venv/
 .venv-databricks/
+.venv-airflow/
 .env
 __pycache__/
 *.pyc

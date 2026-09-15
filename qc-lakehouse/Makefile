@@ -1,4 +1,4 @@
-.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all generate-reference-data generate-fact-data dbt-run dbt-test dbt-docs
+.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt install-airflow test-orchestration smoke-all generate-reference-data generate-fact-data dbt-run dbt-test dbt-docs
 
 venv:
 	uv python pin 3.12
@@ -48,6 +48,22 @@ install-dbt:
 smoke-dbt:
 	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt debug --project-dir dbt/qc_lakehouse
 	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt run --project-dir dbt/qc_lakehouse --select hello_dbt
+
+# Isolated venv for Airflow tooling, same reasoning as install-databricks's
+# .venv-databricks: Airflow's own dependency constraints are notorious for conflicting with
+# an unrelated project's pinned pyspark/dbt-databricks versions, so it never goes in the main
+# venv. Airflow itself runs in Docker (see orchestration/docker-compose.yml) - this venv
+# exists only so the DAG file can be structurally validated locally via pytest without
+# needing Docker running.
+install-airflow:
+	uv venv .venv-airflow --python 3.12
+	uv pip install --python .venv-airflow/bin/python apache-airflow apache-airflow-providers-databricks
+
+# Structural DAG validation only (DagBag import + task/dependency checks) - lives outside the
+# main `tests/` dir and the main `make check` because apache-airflow is not installed in the
+# main venv. See orchestration/tests/test_dag.py.
+test-orchestration:
+	.venv-airflow/bin/python -m pytest orchestration/tests -q
 
 smoke-all: smoke-local smoke-databricks smoke-dbt
 
