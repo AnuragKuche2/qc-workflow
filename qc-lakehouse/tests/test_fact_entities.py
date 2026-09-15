@@ -15,6 +15,7 @@ from qc_lakehouse.generator.fact_entities import (
     build_match_attempts,
     build_order_items,
     build_orders_shell,
+    build_payments,
     finalize_orders,
 )
 from qc_lakehouse.generator.schemas import (
@@ -351,5 +352,66 @@ def test_build_match_attempts_riders_belong_to_the_orders_delivery_zone():
         rider_zone = {r["rider_id"]: r["home_zone_id"] for r in fx["riders_df"].select("rider_id", "home_zone_id").collect()}
         for row in matches.select("order_id", "rider_id").collect():
             assert rider_zone[row["rider_id"]] == order_zone[row["order_id"]]
+    finally:
+        spark.stop()
+
+
+def test_build_payments_covers_every_non_unfulfilled_order_exactly_once():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        payments = build_payments(config, orders)
+
+        payable_ids = {r["order_id"] for r in orders.filter("order_status != 'UNFULFILLED'").select("order_id").collect()}
+        payment_order_ids = [r["order_id"] for r in payments.select("order_id").collect()]
+        assert set(payment_order_ids) == payable_ids
+        assert len(payment_order_ids) == len(set(payment_order_ids))   # exactly once each
+    finally:
+        spark.stop()
+
+
+def test_build_payments_amount_matches_order_total():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        payments = build_payments(config, orders)
+
+        order_total = {r["order_id"]: r["order_total"] for r in orders.select("order_id", "order_total").collect()}
+        for row in payments.select("order_id", "amount").collect():
+            assert row["amount"] == order_total[row["order_id"]]
+    finally:
+        spark.stop()
+
+
+def test_build_payments_method_and_status_are_valid_values():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        payments = build_payments(config, orders)
+
+        rows = payments.select("method", "status").collect()
+        assert all(r["method"] in ("upi", "card", "wallet", "cod") for r in rows)
+        assert all(r["status"] in ("SUCCESS", "FAILED") for r in rows)
     finally:
         spark.stop()

@@ -338,3 +338,39 @@ def build_match_attempts(config: GeneratorConfig, orders_df, riders_df):
     return exploded.select(
         "match_id", "order_id", "rider_id", "attempt_number", "offered_at", "response", "responded_at",
     )
+
+
+def build_payments(config: GeneratorConfig, orders_df):
+    """One row per order that reached a payable state (DELIVERED or CANCELLED - both
+    were charged; UNFULFILLED orders never matched, so were never charged)."""
+    seed = config.seed
+
+    payable = orders_df.filter("order_status != 'UNFULFILLED'")
+
+    u_status = _h(F.col("order_id"), seed + 501)
+    u_method = F.pmod(F.hash("order_id", F.lit(seed + 502)), F.lit(1000)) / 1000.0
+
+    payments = (
+        payable
+        .withColumn(
+            "status",
+            F.when(u_status < F.lit(config.payment_failure_rate), F.lit("FAILED")).otherwise(F.lit("SUCCESS")),
+        )
+        .withColumn(
+            "method",
+            F.when(u_method < F.lit(0.45), F.lit("upi"))
+             .when(u_method < F.lit(0.75), F.lit("card"))
+             .when(u_method < F.lit(0.90), F.lit("wallet"))
+             .otherwise(F.lit("cod")),
+        )
+        .withColumn(
+            "paid_at",
+            F.expr(f"timestampadd(SECOND, 5 + pmod(abs(hash(order_id, {seed + 503})), 30), placed_at)"),
+        )
+        .withColumnRenamed("order_total", "amount")
+    )
+
+    w = Window.orderBy("order_id")
+    payments = payments.withColumn("payment_id", F.row_number().over(w).cast("long"))
+
+    return payments.select("payment_id", "order_id", "amount", "method", "status", "paid_at")
