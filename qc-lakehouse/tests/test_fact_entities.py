@@ -9,7 +9,7 @@ from qc_lakehouse.generator.entities import (
     build_riders,
     build_zones,
 )
-from qc_lakehouse.generator.fact_entities import build_orders_shell
+from qc_lakehouse.generator.fact_entities import build_order_items, build_orders_shell
 from qc_lakehouse.generator.schemas import (
     DEMAND_HOURLY_SCHEMA,
     GEN_RESTAURANT_PROFILE_SCHEMA,
@@ -130,5 +130,67 @@ def test_build_orders_shell_is_deterministic_for_the_same_seed():
         a_sorted = sorted((r["order_id"], r["restaurant_id"], r["customer_id"]) for r in a)
         b_sorted = sorted((r["order_id"], r["restaurant_id"], r["customer_id"]) for r in b)
         assert a_sorted == b_sorted
+    finally:
+        spark.stop()
+
+
+def test_build_order_items_every_item_belongs_to_a_real_order_and_menu_item():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        orders = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, orders, fx["menu_items_df"])
+
+        order_ids = {r["order_id"] for r in orders.select("order_id").collect()}
+        menu_item_ids = {r["menu_item_id"] for r in fx["menu_items_df"].select("menu_item_id").collect()}
+        rows = items.select("order_id", "menu_item_id", "quantity", "line_total", "unit_price").collect()
+
+        assert len(rows) > 0
+        assert all(r["order_id"] in order_ids for r in rows)
+        assert all(r["menu_item_id"] in menu_item_ids for r in rows)
+        assert all(r["quantity"] >= 1 for r in rows)
+        assert all(r["line_total"] == r["unit_price"] * r["quantity"] for r in rows)
+    finally:
+        spark.stop()
+
+
+def test_build_order_items_every_order_gets_at_least_one_item():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        orders = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, orders, fx["menu_items_df"])
+
+        order_ids = {r["order_id"] for r in orders.select("order_id").collect()}
+        item_order_ids = {r["order_id"] for r in items.select("order_id").collect()}
+        assert item_order_ids == order_ids
+    finally:
+        spark.stop()
+
+
+def test_build_order_items_picks_from_the_orders_own_restaurant():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        orders = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, orders, fx["menu_items_df"])
+
+        order_restaurant = {r["order_id"]: r["restaurant_id"] for r in orders.select("order_id", "restaurant_id").collect()}
+        menu_restaurant = {r["menu_item_id"]: r["restaurant_id"] for r in fx["menu_items_df"].select("menu_item_id", "restaurant_id").collect()}
+
+        for row in items.select("order_id", "menu_item_id").collect():
+            assert menu_restaurant[row["menu_item_id"]] == order_restaurant[row["order_id"]]
     finally:
         spark.stop()

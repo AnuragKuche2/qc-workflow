@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import bisect
 
+from pyspark.sql import Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import LongType
 
@@ -175,4 +176,53 @@ def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaur
         "order_id", "customer_id", "restaurant_id", "zone_id", "placed_at",
         "order_status", "delivery_fee", "commission_pct", "delivery_notes",
         "day_index", "hour",
+    )
+
+
+def build_order_items(config: GeneratorConfig, orders_shell_df, menu_items_df):
+    """One or more line items per order, sampled from that order's own restaurant's menu.
+    Item count is weighted toward 1-2 items (45%/30%/15%/10% for 1/2/3/4)."""
+    seed = config.seed
+
+    restaurant_menus = (
+        menu_items_df
+        .groupBy("restaurant_id")
+        .agg(F.collect_list(F.struct("menu_item_id", "price")).alias("items"))
+    )
+
+    u_count = _h(F.col("order_id"), seed + 201)
+    items_base = (
+        orders_shell_df.select("order_id", "restaurant_id")
+        .withColumn(
+            "item_count",
+            F.when(u_count < F.lit(0.45), F.lit(1))
+             .when(u_count < F.lit(0.75), F.lit(2))
+             .when(u_count < F.lit(0.90), F.lit(3))
+             .otherwise(F.lit(4)),
+        )
+        .join(F.broadcast(restaurant_menus), "restaurant_id")
+    )
+
+    exploded = (
+        items_base
+        .withColumn("item_slot", F.explode(F.sequence(F.lit(0), F.col("item_count") - F.lit(1))))
+        .withColumn(
+            "item_idx",
+            F.pmod(F.hash("order_id", "item_slot", F.lit(seed + 202)), F.size("items")),
+        )
+        .withColumn("picked", F.element_at(F.col("items"), F.col("item_idx") + F.lit(1)))
+        .withColumn("menu_item_id", F.col("picked.menu_item_id"))
+        .withColumn("unit_price", F.col("picked.price").cast("decimal(18,2)"))
+        .withColumn(
+            "quantity",
+            (F.pmod(F.hash("order_id", "item_slot", F.lit(seed + 203)), F.lit(3)) + F.lit(1)).cast("int"),
+        )
+        .withColumn("line_total", (F.col("unit_price") * F.col("quantity")).cast("decimal(18,2)"))
+    )
+
+    w = Window.orderBy("order_id", "item_slot")
+    exploded = exploded.withColumn("order_item_id", F.row_number().over(w).cast("long"))
+
+    return exploded.select(
+        "order_item_id", "order_id", "menu_item_id", "quantity", "unit_price", "line_total",
     )
