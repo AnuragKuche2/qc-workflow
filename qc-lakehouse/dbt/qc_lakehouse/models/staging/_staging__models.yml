@@ -122,8 +122,11 @@ models:
   - name: stg_customers
     description: >
       One row per customer. email/phone are masked here and never appear unmasked in this or
-      any downstream model - email_hash is a one-way SHA-256 hash, phone_masked keeps the
-      country code and last 3 digits visible with the middle digits starred out.
+      any downstream model - email_hash is a salted one-way SHA-256 hash (salt from the
+      PII_HASH_SALT env var, never committed), phone_masked keeps the country code and last
+      3 digits visible with the middle digits starred out. full_name and precise lat/lon are
+      NOT masked and flow through to dim_customer in gold - this is the project's current
+      PII boundary by design, not an oversight.
     columns:
       - name: customer_id
         description: Primary key.
