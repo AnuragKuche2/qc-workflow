@@ -97,10 +97,21 @@ def check_payment_amount_matches_order_total(orders, payments) -> None:
 
 def _write(spark, config: GeneratorConfig, name: str, df, schema) -> int:
     """Overwrite one Delta table from a DataFrame already matching `schema`. Idempotent:
-    full-table regeneration from a fixed seed, not an incremental append."""
+    full-table regeneration from a fixed seed, not an incremental append.
+
+    Writes `df` directly - it already matches `schema` by construction (every builder's own
+    .select() call produces exactly the target columns). The old `spark.createDataFrame(df.rdd,
+    schema)` round-trip was a no-op re-materialization that doesn't even work on Databricks
+    serverless/Standard-access-mode compute (`DataFrame.rdd` raises RDD_NOT_SUPPORTED there -
+    this is what broke the live run). The assertion below is a cheap safety net for the same
+    guarantee that round-trip was reaching for, without needing the RDD API to get it."""
+    actual_names = [f.name for f in df.schema.fields]
+    expected_names = [f.name for f in schema.fields]
+    assert actual_names == expected_names, (
+        f"{name}: DataFrame columns {actual_names} do not match expected schema columns {expected_names}"
+    )
     table = f"{config.catalog}.{config.schema}.{name}"
-    (spark.createDataFrame(df.rdd, schema)
-        .write.mode("overwrite")
+    (df.write.mode("overwrite")
         .option("overwriteSchema", "true")
         .saveAsTable(table))
     return spark.table(table).count()

@@ -478,3 +478,33 @@ def test_finalize_orders_and_build_refunds_defect_formatting_matches_defects_mod
         accounting = format_refund_amount(amount, use_accounting_format=True)
         assert plain == f"{amount:.2f}"
         assert accounting == f"({amount:.2f})"
+
+
+def test_refund_amount_string_cast_matches_format_refund_amount_via_real_spark(spark):
+    """Task 11's parity test only compared Python to Python (tautological) - this test
+    actually runs Spark's decimal(18,2)-to-string cast, the real mechanism build_refunds
+    uses for refund_amount_raw, and checks it against defects.py's reference function."""
+    from qc_lakehouse.generator.defects import format_refund_amount
+
+    samples = [
+        (Decimal("5.00"), False), (Decimal("0.47"), False), (Decimal("1234.50"), False),
+        (Decimal("99999999.99"), False), (Decimal("5.00"), True), (Decimal("0.47"), True),
+        (Decimal("0.00"), False), (Decimal("0.00"), True),
+    ]
+    df = spark.createDataFrame(
+        samples, "amount decimal(18,2), use_accounting_format boolean",
+    )
+    result = df.withColumn(
+        "refund_amount_raw",
+        F.when(
+            F.col("use_accounting_format"),
+            F.concat(F.lit("("), F.col("amount").cast("string"), F.lit(")")),
+        ).otherwise(F.col("amount").cast("string")),
+    ).select("amount", "use_accounting_format", "refund_amount_raw").collect()
+
+    for row in result:
+        expected = format_refund_amount(row["amount"], row["use_accounting_format"])
+        assert row["refund_amount_raw"] == expected, (
+            f"amount={row['amount']} accounting={row['use_accounting_format']}: "
+            f"Spark cast produced {row['refund_amount_raw']!r}, expected {expected!r}"
+        )
