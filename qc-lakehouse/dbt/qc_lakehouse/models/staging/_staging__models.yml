@@ -249,3 +249,33 @@ models:
               values: ['SUCCESS', 'FAILED']
       - name: amount
         tests: [not_null]
+
+  - name: stg_refunds
+    description: >
+      One row per refund. refund_amount_raw's accounting-parens text defect is cleaned into
+      a proper positive decimal(18,2) - was_money_text_defect flags which rows needed it.
+    columns:
+      - name: refund_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_id
+        description: Foreign key to orders.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: payment_id
+        description: Foreign key to payments.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_payments')
+              field: payment_id
+      - name: refund_amount
+        tests: [not_null]
+      - name: reason
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['CANCELLED', 'QUALITY_ISSUE', 'LATE_DELIVERY', 'MISSING_ITEMS']
