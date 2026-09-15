@@ -8,7 +8,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import LongType, StringType
 
 from qc_lakehouse.generator.config import GeneratorConfig
-from qc_lakehouse.generator.defects import mangle_text_casing_and_whitespace
+from qc_lakehouse.generator.defects import format_refund_amount, mangle_text_casing_and_whitespace
 
 
 def _h(col, salt: int):
@@ -374,3 +374,69 @@ def build_payments(config: GeneratorConfig, orders_df):
     payments = payments.withColumn("payment_id", F.row_number().over(w).cast("long"))
 
     return payments.select("payment_id", "order_id", "amount", "method", "status", "paid_at")
+
+
+def build_refunds(config: GeneratorConfig, orders_df, payments_df):
+    """One row for every CANCELLED order (full refund) plus a refund_rate fraction of
+    DELIVERED orders (a partial quality-issue credit, 30-100% of order_total)."""
+    seed = config.seed
+
+    cancelled = (
+        orders_df.filter("order_status = 'CANCELLED'")
+        .withColumn("refund_fraction", F.lit(1.0))
+        .withColumn("reason", F.lit("CANCELLED"))
+    )
+
+    u_refund = _h(F.col("order_id"), seed + 601)
+    delivered_refunded = (
+        orders_df.filter("order_status = 'DELIVERED'")
+        .withColumn("u_refund", u_refund)
+        .filter(F.col("u_refund") < F.lit(config.refund_rate))
+        .drop("u_refund")
+        .withColumn("refund_fraction", F.lit(0.3) + _h(F.col("order_id"), seed + 602) * F.lit(0.7))
+        .withColumn(
+            "reason_bucket",
+            F.pmod(F.hash("order_id", F.lit(seed + 603)), F.lit(3)),
+        )
+        .withColumn(
+            "reason",
+            F.when(F.col("reason_bucket") == 0, F.lit("QUALITY_ISSUE"))
+             .when(F.col("reason_bucket") == 1, F.lit("LATE_DELIVERY"))
+             .otherwise(F.lit("MISSING_ITEMS")),
+        )
+        .drop("reason_bucket")
+    )
+
+    candidates = cancelled.unionByName(delivered_refunded)
+
+    joined = (
+        candidates
+        .join(payments_df.select("order_id", "payment_id"), "order_id")
+        .withColumn("refund_amount", (F.col("order_total") * F.col("refund_fraction")).cast("decimal(18,2)"))
+        .withColumn("use_accounting_format", _h(F.col("order_id"), seed + 604) < F.lit(config.money_text_defect_rate))
+    )
+
+    format_udf = F.udf(
+        lambda amount, use_accounting: format_refund_amount(amount, bool(use_accounting)),
+        StringType(),
+    )
+    joined = joined.withColumn(
+        "refund_amount_raw", format_udf(F.col("refund_amount"), F.col("use_accounting_format")),
+    )
+
+    joined = joined.withColumn(
+        "refunded_at",
+        F.when(
+            F.col("order_status") == "CANCELLED",
+            F.expr(f"timestampadd(MINUTE, 5 + pmod(abs(hash(order_id, {seed + 605})), 30), placed_at)"),
+        ).otherwise(
+            F.expr(f"timestampadd(HOUR, 24 + pmod(abs(hash(order_id, {seed + 606})), 48), placed_at)")
+        ),
+    )
+
+    w = Window.orderBy("order_id")
+    joined = joined.withColumn("refund_id", F.row_number().over(w).cast("long"))
+
+    return joined.select(
+        "refund_id", "order_id", "payment_id", "refund_amount_raw", "reason", "refunded_at",
+    )

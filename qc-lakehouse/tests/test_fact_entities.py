@@ -16,6 +16,7 @@ from qc_lakehouse.generator.fact_entities import (
     build_order_items,
     build_orders_shell,
     build_payments,
+    build_refunds,
     finalize_orders,
 )
 from qc_lakehouse.generator.schemas import (
@@ -413,5 +414,93 @@ def test_build_payments_method_and_status_are_valid_values():
         rows = payments.select("method", "status").collect()
         assert all(r["method"] in ("upi", "card", "wallet", "cod") for r in rows)
         assert all(r["status"] in ("SUCCESS", "FAILED") for r in rows)
+    finally:
+        spark.stop()
+
+
+def test_build_refunds_covers_every_cancelled_order():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        payments = build_payments(config, orders)
+        refunds = build_refunds(config, orders, payments)
+
+        cancelled_ids = {r["order_id"] for r in orders.filter("order_status = 'CANCELLED'").select("order_id").collect()}
+        refund_ids = {r["order_id"] for r in refunds.select("order_id").collect()}
+        assert cancelled_ids.issubset(refund_ids)
+    finally:
+        spark.stop()
+
+
+def test_build_refunds_reasons_are_valid_and_payment_id_is_real():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        payments = build_payments(config, orders)
+        refunds = build_refunds(config, orders, payments)
+
+        valid_reasons = {"CANCELLED", "QUALITY_ISSUE", "LATE_DELIVERY", "MISSING_ITEMS"}
+        payment_ids = {r["payment_id"] for r in payments.select("payment_id").collect()}
+        rows = refunds.select("reason", "payment_id").collect()
+        assert all(r["reason"] in valid_reasons for r in rows)
+        assert all(r["payment_id"] in payment_ids for r in rows)
+    finally:
+        spark.stop()
+
+
+def test_build_refunds_applies_money_text_defect_at_the_configured_rate():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config(money_text_defect_rate=1.0, cancel_rate=0.5, unfulfilled_rate=0.0)
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        payments = build_payments(config, orders)
+        refunds = build_refunds(config, orders, payments)
+
+        raw_amounts = [r["refund_amount_raw"] for r in refunds.select("refund_amount_raw").collect()]
+        assert raw_amounts    # at least one refund exists at cancel_rate=0.5
+        assert all(a.startswith("(") and a.endswith(")") for a in raw_amounts)
+    finally:
+        spark.stop()
+
+
+def test_build_refunds_amount_never_exceeds_the_order_total():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        payments = build_payments(config, orders)
+        refunds = build_refunds(config, orders, payments)
+
+        order_total = {r["order_id"]: r["order_total"] for r in orders.select("order_id", "order_total").collect()}
+        for row in refunds.select("order_id", "refund_amount_raw").collect():
+            raw = row["refund_amount_raw"].strip("()")
+            from decimal import Decimal
+            assert Decimal(raw) <= order_total[row["order_id"]]
     finally:
         spark.stop()
