@@ -178,3 +178,74 @@ models:
         tests: [not_null]
       - name: order_total
         tests: [not_null]
+
+  - name: stg_order_items
+    description: One row per order line item, 1:1 with bronze order_items.
+    columns:
+      - name: order_item_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_id
+        description: Foreign key to orders.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: menu_item_id
+        description: Foreign key to menu_items.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_menu_items')
+              field: menu_item_id
+      - name: line_total
+        tests: [not_null]
+
+  - name: stg_match_attempts
+    description: One offer/response row per courier match attempt, 1:1 with bronze match_attempts.
+    columns:
+      - name: match_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_id
+        description: Foreign key to orders.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: rider_id
+        description: Foreign key to riders.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_riders')
+              field: rider_id
+      - name: response
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['ACCEPTED', 'DECLINED', 'TIMEOUT']
+
+  - name: stg_payments
+    description: One row per payable order (DELIVERED/CANCELLED), 1:1 with bronze payments.
+    columns:
+      - name: payment_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_id
+        description: Foreign key to orders.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['SUCCESS', 'FAILED']
+      - name: amount
+        tests: [not_null]
