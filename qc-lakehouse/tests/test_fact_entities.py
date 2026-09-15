@@ -12,6 +12,7 @@ from qc_lakehouse.generator.entities import (
     build_zones,
 )
 from qc_lakehouse.generator.fact_entities import (
+    build_match_attempts,
     build_order_items,
     build_orders_shell,
     finalize_orders,
@@ -283,5 +284,72 @@ def test_finalize_orders_applies_text_noise_defect_at_the_configured_rate():
         for n in notes:
             mangled = n.isupper() or n.islower() or n != n.strip()
             assert mangled, f"note not mangled: {n!r}"
+    finally:
+        spark.stop()
+
+
+def test_build_match_attempts_matched_orders_have_exactly_one_accepted():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        matches = build_match_attempts(config, orders, fx["riders_df"])
+
+        accepted_counts = {
+            r["order_id"]: r["n"]
+            for r in matches.filter("response = 'ACCEPTED'").groupBy("order_id").count().withColumnRenamed("count", "n").collect()
+        }
+        matched_order_ids = {
+            r["order_id"] for r in orders.filter("order_status != 'UNFULFILLED'").select("order_id").collect()
+        }
+        for oid in matched_order_ids:
+            assert accepted_counts.get(oid) == 1, f"order {oid} does not have exactly one ACCEPTED attempt"
+    finally:
+        spark.stop()
+
+
+def test_build_match_attempts_unfulfilled_orders_have_zero_accepted():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        matches = build_match_attempts(config, orders, fx["riders_df"])
+
+        unfulfilled_ids = {r["order_id"] for r in orders.filter("order_status = 'UNFULFILLED'").select("order_id").collect()}
+        accepted_ids = {r["order_id"] for r in matches.filter("response = 'ACCEPTED'").select("order_id").collect()}
+        assert unfulfilled_ids.isdisjoint(accepted_ids)
+    finally:
+        spark.stop()
+
+
+def test_build_match_attempts_riders_belong_to_the_orders_delivery_zone():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+        matches = build_match_attempts(config, orders, fx["riders_df"])
+
+        order_zone = {r["order_id"]: r["zone_id"] for r in orders.select("order_id", "zone_id").collect()}
+        rider_zone = {r["rider_id"]: r["home_zone_id"] for r in fx["riders_df"].select("rider_id", "home_zone_id").collect()}
+        for row in matches.select("order_id", "rider_id").collect():
+            assert rider_zone[row["rider_id"]] == order_zone[row["order_id"]]
     finally:
         spark.stop()

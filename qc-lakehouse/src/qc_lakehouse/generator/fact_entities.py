@@ -271,3 +271,70 @@ def finalize_orders(config: GeneratorConfig, orders_shell_df, order_items_df):
         "order_status", "subtotal", "delivery_fee", "commission_pct", "commission_amount",
         "order_total", "delivery_notes",
     )
+
+
+def build_match_attempts(config: GeneratorConfig, orders_df, riders_df):
+    """1+ offer/response rows per order. Matched orders (DELIVERED/CANCELLED) get 1-3
+    attempts with the LAST marked ACCEPTED; UNFULFILLED orders get 2-3 attempts, all
+    DECLINED/TIMEOUT - the rider pool is restricted to riders whose home_zone_id matches
+    the order's delivery zone."""
+    seed = config.seed
+
+    zone_riders = (
+        riders_df.filter("is_active")
+        .groupBy("home_zone_id")
+        .agg(F.collect_list("rider_id").alias("rider_ids"))
+    )
+
+    u_count = _h(F.col("order_id"), seed + 401)
+    base = (
+        orders_df.select("order_id", "zone_id", "order_status", "placed_at")
+        .withColumn(
+            "attempt_count",
+            F.when(
+                F.col("order_status") == "UNFULFILLED",
+                F.when(u_count < F.lit(0.5), F.lit(2)).otherwise(F.lit(3)),
+            ).otherwise(
+                F.when(u_count < F.lit(0.7), F.lit(1))
+                 .when(u_count < F.lit(0.9), F.lit(2))
+                 .otherwise(F.lit(3))
+            ),
+        )
+        .join(F.broadcast(zone_riders), F.col("zone_id") == F.col("home_zone_id"))
+    )
+
+    exploded = (
+        base
+        .withColumn("attempt_number", F.explode(F.sequence(F.lit(1), F.col("attempt_count"))))
+        .withColumn(
+            "rider_idx",
+            F.pmod(F.hash("order_id", "attempt_number", F.lit(seed + 402)), F.size("rider_ids")),
+        )
+        .withColumn("rider_id", F.element_at(F.col("rider_ids"), F.col("rider_idx") + F.lit(1)))
+        .withColumn(
+            "response",
+            F.when(
+                (F.col("order_status") != "UNFULFILLED") & (F.col("attempt_number") == F.col("attempt_count")),
+                F.lit("ACCEPTED"),
+            ).otherwise(
+                F.when(
+                    F.pmod(F.hash("order_id", "attempt_number", F.lit(seed + 403)), F.lit(2)) == 0,
+                    F.lit("DECLINED"),
+                ).otherwise(F.lit("TIMEOUT"))
+            ),
+        )
+        .withColumn("offered_at", F.expr("timestampadd(MINUTE, (attempt_number - 1) * 2, placed_at)"))
+        .withColumn(
+            "responded_at",
+            F.expr(
+                f"timestampadd(SECOND, 15 + pmod(abs(hash(order_id, attempt_number, {seed + 404})), 60), offered_at)"
+            ),
+        )
+    )
+
+    w = Window.orderBy("order_id", "attempt_number")
+    exploded = exploded.withColumn("match_id", F.row_number().over(w).cast("long"))
+
+    return exploded.select(
+        "match_id", "order_id", "rider_id", "attempt_number", "offered_at", "response", "responded_at",
+    )
