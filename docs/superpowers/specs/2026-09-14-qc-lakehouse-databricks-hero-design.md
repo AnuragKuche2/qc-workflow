@@ -464,7 +464,119 @@ dbt/transformation work remain out of scope - deferred to W1b and Sub-project C 
 - `make check` gains real, fast, Spark-free unit test coverage for `defects.py`'s pure
   functions.
 
-## 7. Open questions for later sub-projects (not blocking A or B)
+## 8. Sub-project C: Transformation (dbt-databricks medallion) - detailed design
+
+### 8.1 Background
+
+Sub-project B (done) writes 14 tables to `qc_dev.bronze_source`: 9 reference/dimension-ish
+tables (cities, zones, restaurants, riders, menu_items, rider_payout_tiers, customers,
+demand_daily, demand_hourly) plus 5 money-chain fact tables from widen step W1a (orders,
+order_items, match_attempts, payments, refunds). Two deliberate data-quality defects live in
+that bronze data specifically for this sub-project to clean: `refunds.refund_amount_raw` is a
+STRING (sometimes accounting-parens formatted, e.g. `"(20.47)"`), and `orders.delivery_notes`
+has casing/whitespace mangling on a fraction of non-null rows. This is dbt's hero showcase per
+section 4's decomposition table - a full bronze->silver->gold medallion pipeline with real
+tests, docs, and lineage against a live Databricks serverless SQL warehouse.
+
+### 8.2 Scope decisions
+
+- **Medallion mapping onto dbt model types**: bronze is unchanged (declared as dbt `sources:`
+  against `qc_dev.bronze_source`, never modified). Silver is split into two dbt model types for
+  readability/testability, both landing in `qc_dev.silver`: `stg_*` (one per bronze source,
+  1:1 grain, type casts + defect cleaning, no joins) and `int_*` (cross-table business logic).
+  Gold is a proper dimensional model (`dim_*`/`fct_*`) landing in `qc_dev.gold`.
+- **Catalog/schema separation**: dbt gets its own env vars (not `DATABRICKS_CATALOG`/
+  `DATABRICKS_SCHEMA`, which stay pointed at `workspace.dev` for Sub-project A's Python-side
+  smoke tests) plus a custom `generate_schema_name` macro so `+schema: silver`/`+schema: gold`
+  config in `dbt_project.yml` lands models directly in `qc_dev.silver`/`qc_dev.gold` without
+  dbt's default schema-prefixing behavior.
+- **Materialization**: staging and intermediate models as views (cheap, no storage cost -
+  they're cleaning/composition lenses, nothing queries them directly except downstream
+  models). Gold marts as tables (queried repeatedly - by this project now, by Sub-project G's
+  text-to-SQL agent later - so paying the write cost once beats recomputing joins per query).
+  No incremental materialization: bronze itself is fully regenerated via `mode("overwrite")`
+  each generator run, not incrementally appended, so incremental dbt models would have no
+  natural watermark to key off - full-refresh table/view materializations honestly match how
+  the data actually arrives.
+- **PII handling**: `customers.py`'s own code comment defers pseudonymization to this
+  sub-project ("pseudonymization at Silver has to be real work with a real column mask") -
+  `stg_customers` masks `email`/`phone` rather than passing them through raw. This is the one
+  requirement not driven by the two named defects but discovered from B's own code.
+- **`fct_deliveries` scope**: no delivery-completion timestamp exists anywhere in current
+  bronze data (`match_attempts.responded_at` is the courier accepting the job, not completing
+  delivery), so true delivery-SLA measurement (actual vs. `zones.sla_target_minutes`) is not
+  possible yet. `fct_deliveries` is scoped to what's honestly measurable now: match acceptance
+  rate, attempts-per-order, time-to-accept. `sla_target_minutes` is still carried through as a
+  dimension attribute so real SLA-adherence measurement is a small addition once W1b lands,
+  not a redesign. See section 9 for the related open item on Sub-project D's missing review
+  data.
+- **Testing depth**: generic tests (`not_null`/`unique`/`relationships`/`accepted_values`) on
+  every model, PLUS custom singular SQL tests re-implementing the money-chain invariants
+  `fact_writer.py` already checks in Python (`check_subtotal_matches_line_items`,
+  `check_payment_amount_matches_order_total`, `check_exactly_one_accepted_match_per_matched_order`)
+  - now verified independently over the *gold* layer by a different tool, proving the
+  transformation didn't silently break something the generator got right.
+
+### 8.3 Project structure & model list
+
+```
+dbt/qc_lakehouse/models/
+  staging/
+    stg_cities.sql, stg_zones.sql, stg_restaurants.sql, stg_riders.sql,
+    stg_menu_items.sql, stg_rider_payout_tiers.sql, stg_customers.sql,
+    stg_demand_daily.sql, stg_demand_hourly.sql,
+    stg_orders.sql, stg_order_items.sql, stg_match_attempts.sql,
+    stg_payments.sql, stg_refunds.sql
+    _staging__sources.yml       (source declarations against qc_dev.bronze_source)
+    _staging__models.yml        (descriptions + generic tests)
+  intermediate/
+    int_order_matching.sql      (resolves each order's one ACCEPTED match_attempt, or none)
+    int_order_economics.sql     (orders + order_items agg + payments + refunds, one row/order)
+    _intermediate__models.yml
+  marts/
+    dim_customer.sql, dim_restaurant.sql, dim_rider.sql, dim_zone.sql, dim_date.sql
+    fct_orders.sql              (grain: order_id - subtotal, fees, commission, refunds, net revenue)
+    fct_deliveries.sql          (grain: order_id - match attempts, acceptance, time-to-accept)
+    _marts__models.yml
+    tests/                      (custom singular SQL tests, one file per invariant)
+```
+
+`stg_orders` and `stg_refunds` each add a `was_<defect>_flag` boolean column alongside the
+cleaned value, so the cleaning itself is auditable rather than silently invisible.
+`dim_restaurant` sources only `restaurants` - never `_gen_restaurant_profile` (generator-only
+internals the real pipeline must never touch, per section 6's own schema design). `dim_zone`
+folds city attributes (name, country, timezone) in directly rather than a separate `dim_city`
+(3 cities total - not worth a standalone dimension at this scale).
+
+### 8.4 Testing & docs strategy
+
+Every model gets a `description:` in its `.yml` (column-level too, especially the two
+defect-cleaning columns). `dbt docs generate` produces the browsable docs site + lineage DAG,
+wired as a new `make dbt-docs` target alongside the existing `make smoke-dbt`.
+
+### 8.5 Explicitly out of scope for C
+
+Review/comment data and sentiment analysis (Sub-project D's problem - no such data exists yet,
+see section 9). True delivery-SLA measurement (needs W1b's delivery-completion events).
+Orchestrating dbt runs on a schedule (Sub-project E). Text-to-SQL access to gold marts
+(Sub-project G).
+
+### 8.6 Success criteria
+
+- `dbt run` against live Databricks builds all staging/intermediate/mart models into
+  `qc_dev.silver`/`qc_dev.gold` without error.
+- `dbt test` passes: every generic test plus every custom singular test (the re-implemented
+  money-chain invariants) passes against the real, live-generated data.
+- Both defects are demonstrably cleaned: `stg_refunds.refund_amount` is a correct
+  `decimal(18,2)` for every row regardless of the source string's formatting;
+  `stg_orders.delivery_notes` casing/whitespace is normalized for every previously-mangled row.
+  Both verified against the flag columns, not just spot-checked.
+- `dbt docs generate` produces a working docs site with a visible lineage graph from bronze
+  sources through to gold marts.
+- `make check`-equivalent dbt coverage: `dbt test` runs cleanly as part of this sub-project's
+  own CI-able check command.
+
+## 9. Open questions for later sub-projects (not blocking A or B)
 
 - ~~Exact `databricks-connect` version pin depends on the Free Edition workspace's current
   serverless runtime version at implementation time - confirm during A rather than pinning
@@ -482,3 +594,19 @@ dbt/transformation work remain out of scope - deferred to W1b and Sub-project C 
   equivalents) for real cost measurement in Sub-project H, or whether a fallback (bytes-scanned
   from query metrics, DBU-seconds estimated from job run duration) is needed - confirm during
   H's design, since Free Edition's system-table access may differ from a paid workspace.
+- **Found during C's brainstorming:** no review/comment/user-generated-text data exists
+  anywhere in the pipeline. `orders.delivery_notes` is NOT a substitute - it's a fixed pool of
+  6 canned delivery instructions set by the customer at order time, not organic post-delivery
+  feedback. Sub-project D (AI review-issue layer) depends on this data existing but nothing
+  currently generates it - D's own design needs to include a synthetic review-generation step
+  (likely a new widen step in B, or self-contained within D), not assume the data is already
+  there.
+- **Found during C's brainstorming:** true delivery-SLA measurement (actual delivery time vs.
+  `zones.sla_target_minutes`) is not possible with current bronze data - there is no
+  delivery-completion timestamp anywhere (`match_attempts.responded_at` is the courier
+  *accepting the job*, not completing delivery). C's gold layer (`fct_deliveries`) is
+  deliberately scoped to what's honestly measurable now (match acceptance rate,
+  attempts-per-order, time-to-accept) rather than fabricating a fake `delivered_at`. Once W1b
+  adds real delivery-completion events, true SLA-adherence measurement (actual vs.
+  `sla_target_minutes`, already carried through as a dimension attribute) becomes a small
+  natural addition to the existing dbt project, not a redesign.
