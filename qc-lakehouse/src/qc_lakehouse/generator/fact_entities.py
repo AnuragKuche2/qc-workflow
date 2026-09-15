@@ -63,11 +63,22 @@ def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaur
     # broadcast-join bucketing customers.py uses for zone assignment. Both reference
     # tables are small enough (thousands / low hundred-thousands of rows) to collect and
     # prefix-sum driver-side in well under a second.
+    #
+    # Weights are normalized by their own sum before accumulating, so the cumulative
+    # thresholds always land in [0, 1] - the same range as the uniform draw in `_h`.
+    # restaurant_profile_df's popularity_weight (zipf) already sums to ~1 across all
+    # restaurants, so normalizing is a no-op there, but customer_profile_df's
+    # order_propensity is an UNBOUNDED lognormal draw per customer (mean ~0.9, summing to
+    # roughly n_customers across the table) - without normalizing, the cumulative sum blows
+    # past 1 after just the first one or two customer_ids, and since every draw is < 1,
+    # bucketing would always resolve to whichever of those first few ids has the smallest
+    # cum that still clears the draw. Concretely: every order collapses onto customer_id 1.
     def _cumulative(rows, id_field, weight_field, out_schema):
         rows = sorted(rows, key=lambda r: r[id_field])
+        total = sum(row[weight_field] for row in rows)
         cum, out = 0.0, []
         for row in rows:
-            cum += row[weight_field]
+            cum += row[weight_field] / total
             out.append((row[id_field], cum))
         return spark.createDataFrame(out, out_schema)
 
