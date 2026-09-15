@@ -1,0 +1,25 @@
+version: 2
+
+models:
+  - name: dim_customer
+    description: Customer dimension. email/phone are masked (see stg_customers).
+    columns:
+      - name: customer_id
+        description: Primary key.
+        tests: [unique, not_null]
+
+  - name: dim_restaurant
+    description: >
+      Restaurant dimension. Deliberately excludes popularity/price-index internals - see
+      stg_restaurants.
+    columns:
+      - name: restaurant_id
+        description: Primary key.
+        tests: [unique, not_null]
+
+  - name: dim_rider
+    description: Rider dimension.
+    columns:
+      - name: rider_id
+        description: Primary key.
+        tests: [unique, not_null]
