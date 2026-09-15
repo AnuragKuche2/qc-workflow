@@ -1,4 +1,4 @@
-.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all generate-reference-data
+.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all generate-reference-data generate-fact-data
 
 venv:
 	uv python pin 3.12
@@ -56,3 +56,9 @@ smoke-all: smoke-local smoke-databricks smoke-dbt
 # because it needs databricks-connect for the serverless session.
 generate-reference-data:
 	.venv-databricks/bin/python scripts/generate_reference_data.py
+
+# Writes real fact data to qc_dev.bronze_source on live Databricks. Requires
+# generate-reference-data to have been run first (this reads the reference tables it
+# wrote). Uses .venv-databricks, same as generate-reference-data.
+generate-fact-data:
+	.venv-databricks/bin/python scripts/generate_fact_data.py

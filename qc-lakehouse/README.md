@@ -116,3 +116,24 @@ produce.
 Idempotent: every write is `mode("overwrite")` from a fixed seed
 (`GeneratorConfig.seed`), so rerunning reproduces the same data rather than
 accumulating duplicates.
+
+## Money-chain fact tables (Sub-project B widen step W1a)
+
+Ported design from `docs/superpowers/specs/2026-09-14-qc-lakehouse-databricks-hero-design.md`,
+section 6.6. Generates `orders`, `order_items`, `match_attempts`, `payments`, `refunds` from
+the already-written `demand_hourly` table and reference-layer profile tables, and writes them
+to `qc_dev.bronze_source`. Requires `make generate-reference-data` to have been run first.
+
+```bash
+make generate-fact-data
+```
+
+Two deliberate, isolated defects are present in the generated data (see
+`src/qc_lakehouse/generator/defects.py`), matching the superseded old plan's defect catalog:
+`refunds.refund_amount_raw` is a STRING, with a `money_text_defect_rate` fraction using
+accounting-negative parens formatting (e.g. `"(20.47)"`); `orders.delivery_notes` gets
+casing/whitespace mangling on a `text_noise_defect_rate` fraction of non-null notes. Both are
+there deliberately, for Sub-project C's dbt staging models to clean.
+
+No Auto Loader here either - still a from-scratch generation run, direct-write to Delta.
+Idempotent the same way the reference layer is: `mode("overwrite")` from a fixed seed.
