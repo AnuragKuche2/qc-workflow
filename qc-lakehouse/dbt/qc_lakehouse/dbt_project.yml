@@ -13,6 +13,7 @@ models:
   qc_lakehouse:
     example:
       +materialized: view
+      +enabled: "{{ target.name == 'dev' }}"
     staging:
       +materialized: view
       +schema: silver

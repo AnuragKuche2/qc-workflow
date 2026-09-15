@@ -2,7 +2,9 @@ version: 2
 
 models:
   - name: dim_customer
-    description: Customer dimension. email/phone are masked (see stg_customers).
+    description: >
+      Customer dimension. email/phone are masked (see stg_customers); full_name/lat/lon pass
+      through unmasked, matching stg_customers' own established PII scope.
     columns:
       - name: customer_id
         description: Primary key.
@@ -32,6 +34,26 @@ models:
         tests: [unique, not_null]
       - name: city_id
         tests: [not_null]
+      - name: zone_name
+        description: Human-readable name of the delivery zone.
+      - name: center_lat
+        description: Latitude of the zone's center point.
+      - name: center_lon
+        description: Longitude of the zone's center point.
+      - name: ring
+        description: Concentric ring index of this zone relative to its city center.
+      - name: base_delivery_fee
+        description: Delivery fee floor for this zone.
+      - name: sla_target_minutes
+        description: Target delivery time in minutes for orders placed in this zone.
+      - name: is_active
+        description: Whether the zone is currently serviceable.
+      - name: city_name
+        description: Name of the city this zone belongs to.
+      - name: country_code
+        description: ISO country code of this zone's city.
+      - name: timezone
+        description: IANA timezone for this zone's city.
 
   - name: dim_date
     description: >
@@ -77,6 +99,18 @@ models:
           - relationships:
               to: ref('dim_date')
               field: date_day
+      - name: order_status
+        description: "Order lifecycle outcome: DELIVERED, CANCELLED, or UNFULFILLED."
+      - name: subtotal
+        description: Sum of line-item totals before delivery fee, carried from stg_orders.
+      - name: commission_amount
+        description: Platform commission owed by the restaurant on this order's subtotal.
+      - name: order_total
+        description: Amount charged to the customer (subtotal plus delivery fee).
+      - name: refund_amount
+        description: Total refunded against this order, computed in int_order_economics.
+      - name: item_count
+        description: Number of distinct line items on this order.
       - name: net_revenue
         tests: [not_null]
 
@@ -111,3 +145,24 @@ models:
           - relationships:
               to: ref('dim_zone')
               field: zone_id
+      - name: date_day
+        description: Calendar date the order was placed, derived from placed_at.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_day
+      - name: placed_at
+        description: Timestamp the order was placed.
+      - name: accepted_at
+        description: Timestamp the accepted match's rider responded, if the order was matched.
+      - name: seconds_to_accept
+        description: Seconds between placed_at and accepted_at, null if the order was never matched.
+      - name: accepted_rider_id
+        description: >
+          Rider who accepted the match for this order. Nullable for UNFULFILLED/unmatched
+          orders that never had an accepted match attempt.
+        tests:
+          - relationships:
+              to: ref('dim_rider')
+              field: rider_id

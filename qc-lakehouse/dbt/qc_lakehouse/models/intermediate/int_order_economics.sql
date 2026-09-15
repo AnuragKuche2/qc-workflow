@@ -4,7 +4,7 @@ with item_totals as (
     group by order_id
 ),
 refund_totals as (
-    select order_id, sum(refund_amount) as total_refunded
+    select order_id, cast(sum(refund_amount) as decimal(18, 2)) as total_refunded
     from {{ ref('stg_refunds') }}
     group by order_id
 )
@@ -21,8 +21,8 @@ select
     o.commission_pct,
     o.commission_amount,
     o.order_total,
-    coalesce(r.total_refunded, 0) as refund_amount,
-    o.order_total - coalesce(r.total_refunded, 0) as net_revenue,
+    cast(coalesce(r.total_refunded, 0) as decimal(18, 2)) as refund_amount,
+    cast(o.order_total - coalesce(r.total_refunded, 0) as decimal(18, 2)) as net_revenue,
     coalesce(i.item_count, 0) as item_count
 from {{ ref('stg_orders') }} o
 left join item_totals i on o.order_id = i.order_id

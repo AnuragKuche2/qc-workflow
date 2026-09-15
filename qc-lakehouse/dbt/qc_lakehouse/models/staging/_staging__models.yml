@@ -178,6 +178,10 @@ models:
         tests: [not_null]
       - name: order_total
         tests: [not_null]
+      - name: was_text_noise_defect
+        description: >
+          Flags rows where delivery_notes had the deliberate text-noise defect
+          (casing/whitespace mangling) detected and cleaned, for auditability.
 
   - name: stg_order_items
     description: One row per order line item, 1:1 with bronze order_items.
@@ -274,6 +278,10 @@ models:
               field: payment_id
       - name: refund_amount
         tests: [not_null]
+      - name: was_money_text_defect
+        description: >
+          Flags rows where refund_amount_raw had the deliberate money-as-text
+          (accounting-parens) defect detected and cleaned, for auditability.
       - name: reason
         tests:
           - not_null
