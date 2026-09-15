@@ -1,0 +1,41 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Raw generated quick-commerce data written by the Sub-project B Spark generator
+      (reference tables from the spine, fact tables from widen step W1a). Read-only from
+      dbt's perspective - never written here.
+    database: qc_dev
+    schema: bronze_source
+    tables:
+      - name: cities
+      - name: zones
+      - name: restaurants
+        description: >
+          Source-visible restaurant attributes only. Does NOT include popularity_weight or
+          price_index - those are generator-only internals (_gen_restaurant_profile), which
+          this project must never source, matching the constraint that the OLTP source would
+          never know a restaurant's true popularity.
+      - name: riders
+      - name: menu_items
+      - name: rider_payout_tiers
+      - name: demand_daily
+      - name: demand_hourly
+      - name: customers
+        description: >
+          Contains raw PII (email, phone) - staging must mask both, they must never reach
+          silver or gold unmasked.
+      - name: orders
+        description: >
+          delivery_notes carries a deliberate text-noise defect (casing/whitespace mangling)
+          on a fraction of non-null rows - staging must clean it.
+      - name: order_items
+      - name: match_attempts
+      - name: payments
+      - name: refunds
+        description: >
+          refund_amount_raw is a STRING, not a decimal - a deliberate defect, sometimes
+          accounting-parens formatted (e.g. "(20.47)"). Staging must parse it back into a
+          proper decimal(18,2), always as a positive magnitude (parens are a formatting
+          quirk, never a sign - the underlying refund amount is always positive).

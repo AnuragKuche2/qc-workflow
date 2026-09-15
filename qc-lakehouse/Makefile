@@ -1,4 +1,4 @@
-.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all generate-reference-data generate-fact-data
+.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt smoke-all generate-reference-data generate-fact-data dbt-run dbt-test dbt-docs
 
 venv:
 	uv python pin 3.12
@@ -62,3 +62,13 @@ generate-reference-data:
 # wrote). Uses .venv-databricks, same as generate-reference-data.
 generate-fact-data:
 	.venv-databricks/bin/python scripts/generate_fact_data.py
+
+# Real medallion work against qc_dev.silver/qc_dev.gold - never the smoke-test `dev` target.
+dbt-run:
+	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt run --project-dir dbt/qc_lakehouse --target qc_dev
+
+dbt-test:
+	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt test --project-dir dbt/qc_lakehouse --target qc_dev
+
+dbt-docs:
+	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt docs generate --project-dir dbt/qc_lakehouse --target qc_dev

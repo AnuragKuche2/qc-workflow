@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: stg_cities
+    description: One row per city, 1:1 with bronze cities, no cleaning needed.
+    columns:
+      - name: city_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: name
+        tests: [not_null]
+      - name: country_code
+        tests: [not_null]
+      - name: timezone
+        tests: [not_null]
