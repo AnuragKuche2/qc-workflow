@@ -43,3 +43,39 @@ models:
         tests: [unique, not_null]
       - name: is_weekend
         tests: [not_null]
+
+  - name: fct_orders
+    description: >
+      Order economics fact - grain is one row per order. subtotal/fees/commission carried
+      from bronze via stg_orders; refund_amount and net_revenue computed in
+      int_order_economics.
+    columns:
+      - name: order_id
+        description: Primary key (one row per order).
+        tests: [unique, not_null]
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+      - name: restaurant_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_restaurant')
+              field: restaurant_id
+      - name: zone_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_zone')
+              field: zone_id
+      - name: date_day
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_day
+      - name: net_revenue
+        tests: [not_null]
