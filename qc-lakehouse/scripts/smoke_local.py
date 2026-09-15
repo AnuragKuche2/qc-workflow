@@ -9,12 +9,13 @@ from pathlib import Path
 from qc_lakehouse.spark_local import build_local_spark_session
 
 WAREHOUSE_DIR = Path("warehouse")
-TABLE_PATH = str(WAREHOUSE_DIR / "smoke_local_table")
+TABLE_DIR = WAREHOUSE_DIR / "smoke_local_table"
+TABLE_PATH = str(TABLE_DIR)
 
 
 def main() -> None:
-    if WAREHOUSE_DIR.exists():
-        shutil.rmtree(WAREHOUSE_DIR)
+    if TABLE_DIR.exists():
+        shutil.rmtree(TABLE_DIR)
 
     spark = build_local_spark_session()
     try:

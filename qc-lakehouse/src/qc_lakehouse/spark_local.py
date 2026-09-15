@@ -7,6 +7,12 @@ DEFAULT_CONF_PATH = Path(__file__).resolve().parents[2] / "conf" / "spark-local.
 
 
 def parse_spark_conf(conf_path: Path) -> dict[str, str]:
+    if not conf_path.exists():
+        raise FileNotFoundError(
+            f"Spark conf file not found at {conf_path}. "
+            "build_local_spark_session() expects an editable install "
+            "(uv sync / uv pip install -e .) run from within the repo checkout."
+        )
     conf: dict[str, str] = {}
     for raw_line in conf_path.read_text().splitlines():
         line = raw_line.strip()

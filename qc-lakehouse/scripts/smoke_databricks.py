@@ -14,16 +14,19 @@ def main() -> None:
         ".smoke_databricks_table"
     )
 
-    df = spark.createDataFrame([(1, "ok"), (2, "ok")], ["id", "status"])
-    df.write.format("delta").mode("overwrite").saveAsTable(table)
+    try:
+        df = spark.createDataFrame([(1, "ok"), (2, "ok")], ["id", "status"])
+        df.write.format("delta").mode("overwrite").saveAsTable(table)
 
-    result = spark.sql(f"SELECT id, status FROM {table} ORDER BY id")
-    rows = {row["id"]: row["status"] for row in result.collect()}
+        result = spark.sql(f"SELECT id, status FROM {table} ORDER BY id")
+        rows = {row["id"]: row["status"] for row in result.collect()}
 
-    assert rows == {1: "ok", 2: "ok"}, f"unexpected rows: {rows}"
-    print(
-        f"smoke-databricks: OK - wrote and read back 2 rows via {table} on serverless compute"
-    )
+        assert rows == {1: "ok", 2: "ok"}, f"unexpected rows: {rows}"
+        print(
+            f"smoke-databricks: OK - wrote and read back 2 rows via {table} on serverless compute"
+        )
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":
