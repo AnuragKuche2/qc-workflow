@@ -13,3 +13,108 @@ models:
         tests: [not_null]
       - name: timezone
         tests: [not_null]
+
+  - name: stg_zones
+    description: One row per zone, 1:1 with bronze zones, no cleaning needed.
+    columns:
+      - name: zone_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: city_id
+        description: Foreign key to cities.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_cities')
+              field: city_id
+      - name: is_active
+        tests: [not_null]
+
+  - name: stg_restaurants
+    description: >
+      One row per restaurant, 1:1 with bronze restaurants. Deliberately excludes
+      popularity_weight/price_index - those are generator-only internals this project must
+      never source.
+    columns:
+      - name: restaurant_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: zone_id
+        description: Foreign key to zones.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_zones')
+              field: zone_id
+      - name: cuisine_type
+        tests: [not_null]
+      - name: commission_pct
+        tests: [not_null]
+
+  - name: stg_riders
+    description: One row per rider, 1:1 with bronze riders, no cleaning needed.
+    columns:
+      - name: rider_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: home_zone_id
+        description: Foreign key to zones.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_zones')
+              field: zone_id
+      - name: vehicle_type
+        tests: [not_null]
+      - name: payout_tier
+        description: Foreign key to rider_payout_tiers.tier.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_rider_payout_tiers')
+              field: tier
+
+  - name: stg_menu_items
+    description: One row per menu item, 1:1 with bronze menu_items, no cleaning needed.
+    columns:
+      - name: menu_item_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: restaurant_id
+        description: Foreign key to restaurants.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_restaurants')
+              field: restaurant_id
+      - name: price
+        tests: [not_null]
+
+  - name: stg_rider_payout_tiers
+    description: Rider payout rate card, 1:1 with bronze rider_payout_tiers.
+    columns:
+      - name: tier
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: base_fare
+        tests: [not_null]
+
+  - name: stg_demand_daily
+    description: Daily order-volume curve, 1:1 with bronze demand_daily.
+    columns:
+      - name: day_index
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_date
+        tests: [unique, not_null]
+
+  - name: stg_demand_hourly
+    description: >
+      Hourly order-volume curve, 1:1 with bronze demand_hourly. Grain is (day_index, hour).
+    columns:
+      - name: day_index
+        tests: [not_null]
+      - name: hour
+        tests: [not_null]
+      - name: orders
+        tests: [not_null]
