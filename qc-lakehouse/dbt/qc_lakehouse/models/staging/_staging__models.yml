@@ -118,3 +118,24 @@ models:
         tests: [not_null]
       - name: orders
         tests: [not_null]
+
+  - name: stg_customers
+    description: >
+      One row per customer. email/phone are masked here and never appear unmasked in this or
+      any downstream model - email_hash is a one-way SHA-256 hash, phone_masked keeps the
+      country code and last 3 digits visible with the middle digits starred out.
+    columns:
+      - name: customer_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: email_hash
+        tests: [not_null]
+      - name: phone_masked
+        tests: [not_null]
+      - name: home_zone_id
+        description: Foreign key to zones.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_zones')
+              field: zone_id
