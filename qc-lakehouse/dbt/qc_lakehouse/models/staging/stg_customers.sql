@@ -1,7 +1,7 @@
 select
     customer_id,
     customer_ref,
-    sha2(concat('{{ env_var("PII_HASH_SALT") }}', lower(trim(email))), 256) as email_hash,
+    sha2(concat('{{ var("pii_hash_salt") }}', lower(trim(email))), 256) as email_hash,
     concat(
         substring(phone, 1, 3),
         repeat('*', length(phone) - 6),

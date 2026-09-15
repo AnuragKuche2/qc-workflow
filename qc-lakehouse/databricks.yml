@@ -39,6 +39,79 @@ resources:
               - ./dist/*.whl
               - python-dotenv
 
+    dbt_run:
+      name: dbt_run
+      tasks:
+        # dbt_task has no field to reference a Databricks secret directly, and
+        # {{secrets/scope/key}} is not resolved inside dbt_task commands (confirmed live - see
+        # scripts/resolve_pii_salt.py's docstring and the task-4 report). This task bridges
+        # dbutils.secrets.get -> a task value the dbt_task below can reference via --vars.
+        # CAVEAT: the resolved value is NOT protected end-to-end - the dbt_task below echoes
+        # its own resolved shell command (including the substituted value) into its run
+        # output/logs in plaintext, visible to anyone with read/API access to that job run.
+        # Known, accepted limitation for this single-user Free Edition workspace - see
+        # scripts/resolve_pii_salt.py and the task-4 report for details.
+        - task_key: resolve_secrets
+          spark_python_task:
+            python_file: ./scripts/resolve_pii_salt.py
+          environment_key: qc_lakehouse_secrets_env
+        - task_key: main
+          depends_on:
+            - task_key: resolve_secrets
+          dbt_task:
+            project_directory: ./dbt/qc_lakehouse
+            commands:
+              - "dbt run --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
+            warehouse_id: ca865a4ef1668613
+            catalog: qc_dev
+            schema: silver
+          environment_key: qc_lakehouse_dbt_env
+      environments:
+        - environment_key: qc_lakehouse_secrets_env
+          spec:
+            environment_version: "3"
+        - environment_key: qc_lakehouse_dbt_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - dbt-databricks>=1.12.5
+
+    dbt_test:
+      name: dbt_test
+      tasks:
+        # Same bridging task as dbt_run's - duplicated rather than shared because task values
+        # only propagate within one job run's own task DAG, and dbt_run/dbt_test are separate
+        # top-level jobs (Task 5's Airflow DAG triggers them independently).
+        # CAVEAT: the resolved value is NOT protected end-to-end - the dbt_task below echoes
+        # its own resolved shell command (including the substituted value) into its run
+        # output/logs in plaintext, visible to anyone with read/API access to that job run.
+        # Known, accepted limitation for this single-user Free Edition workspace - see
+        # scripts/resolve_pii_salt.py and the task-4 report for details.
+        - task_key: resolve_secrets
+          spark_python_task:
+            python_file: ./scripts/resolve_pii_salt.py
+          environment_key: qc_lakehouse_secrets_env
+        - task_key: main
+          depends_on:
+            - task_key: resolve_secrets
+          dbt_task:
+            project_directory: ./dbt/qc_lakehouse
+            commands:
+              - "dbt test --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
+            warehouse_id: ca865a4ef1668613
+            catalog: qc_dev
+            schema: silver
+          environment_key: qc_lakehouse_dbt_env
+      environments:
+        - environment_key: qc_lakehouse_secrets_env
+          spec:
+            environment_version: "3"
+        - environment_key: qc_lakehouse_dbt_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - dbt-databricks>=1.12.5
+
 targets:
   dev:
     mode: development

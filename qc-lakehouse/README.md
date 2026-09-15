@@ -182,3 +182,27 @@ make dbt-docs   # generates the browsable docs site + lineage DAG
 
 Requires `make generate-reference-data` and `make generate-fact-data` to have been run first
 (dbt only reads `qc_dev.bronze_source`, never writes to it).
+
+`stg_customers`'s email hash is salted with `pii_hash_salt`, which has no hardcoded default -
+locally it comes from the `PII_HASH_SALT` env var (`.env`), and dbt fails loudly if that isn't
+set (see `dbt_project.yml`). Never commit a real value for it.
+
+## dbt jobs on Databricks (Sub-project E1)
+
+`databricks.yml` deploys `dbt_run` and `dbt_test` as Databricks Jobs (dbt's native `dbt_task`
+type, serverless, against the same `qc_dev` target as `make dbt-run`/`make dbt-test` above) -
+triggerable via `databricks bundle run dbt_run -t dev` / `dbt_test -t dev`, and later triggered
+by an Airflow DAG.
+
+Because the `dbt_task` type has no field to reference a Databricks secret directly, and
+`{{secrets/scope/key}}` isn't resolved inside its `commands`, each job runs a small
+`resolve_secrets` task first (`scripts/resolve_pii_salt.py`) that reads the `pii_hash_salt`
+secret from the `qc_lakehouse` Databricks secret scope and republishes it as a task value,
+which the dbt task then passes through via `--vars`.
+
+**Known limitation, not a fully-protected secret**: the dbt task echoes its own resolved shell
+command - including the substituted salt value - into that task's run output/logs in
+plaintext. Anyone with read/API access to a `dbt_run`/`dbt_test` job run can see the raw value
+there. This is accepted as reasonable for this project's single-user Free Edition workspace,
+but is a real exposure surface, not a secret-management best practice - re-examine before
+reusing this pattern anywhere with more than one reader of job run history.
