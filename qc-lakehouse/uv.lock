@@ -988,10 +988,16 @@ name = "qc-lakehouse"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "python-dotenv" },
+]
+
+[package.optional-dependencies]
+dbt = [
     { name = "dbt-databricks" },
+]
+spark = [
     { name = "delta-spark" },
     { name = "pyspark" },
-    { name = "python-dotenv" },
 ]
 
 [package.dev-dependencies]
@@ -1003,11 +1009,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dbt-databricks", specifier = ">=1.12.5" },
-    { name = "delta-spark", specifier = ">=4.4.0" },
-    { name = "pyspark", specifier = ">=4.2.0" },
+    { name = "dbt-databricks", marker = "extra == 'dbt'", specifier = ">=1.12.5" },
+    { name = "delta-spark", marker = "extra == 'spark'", specifier = ">=4.4.0" },
+    { name = "pyspark", marker = "extra == 'spark'", specifier = ">=4.2.0" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
 ]
+provides-extras = ["spark", "dbt"]
 
 [package.metadata.requires-dev]
 dev = [

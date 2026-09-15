@@ -1,0 +1,45 @@
+bundle:
+  name: qc_lakehouse
+
+artifacts:
+  qc_lakehouse_wheel:
+    type: whl
+    build: uv build --wheel
+    path: .
+
+resources:
+  jobs:
+    generate_reference_data:
+      name: generate_reference_data
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./scripts/generate_reference_data.py
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    generate_fact_data:
+      name: generate_fact_data
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./scripts/generate_fact_data.py
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+targets:
+  dev:
+    mode: development
+    default: true

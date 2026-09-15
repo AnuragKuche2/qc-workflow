@@ -10,13 +10,17 @@ and their generator-only profile tables back from Delta.
 from __future__ import annotations
 
 from qc_lakehouse.config import load_settings
-from qc_lakehouse.databricks_session import build_databricks_session
+from qc_lakehouse.databricks_session import build_databricks_session, is_running_on_databricks
 from qc_lakehouse.generator.config import GeneratorConfig
 from qc_lakehouse.generator.fact_writer import write_fact_tables
 
 
 def main() -> None:
-    settings = load_settings()
+    # When already running as a Databricks Job task, there is no .env/environment-variable
+    # mechanism to supply Settings, and build_databricks_session doesn't need it on that
+    # path - skip load_settings() entirely rather than fail before ever reaching
+    # is_running_on_databricks()'s own check.
+    settings = None if is_running_on_databricks() else load_settings()
     spark = build_databricks_session(settings)
     # See scripts/generate_reference_data.py's comment: build_databricks_session's own
     # settings.databricks_catalog/settings.databricks_schema (typically workspace.dev) is

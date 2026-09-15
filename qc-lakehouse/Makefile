@@ -1,18 +1,23 @@
-.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt install-airflow test-orchestration smoke-all generate-reference-data generate-fact-data dbt-run dbt-test dbt-docs
+.PHONY: venv install install-baseline check install-spark smoke-local install-databricks smoke-databricks install-dbt smoke-dbt install-airflow test-orchestration smoke-all generate-reference-data generate-fact-data dbt-run dbt-test dbt-docs bundle-validate bundle-deploy
 
 venv:
 	uv python pin 3.12
 	uv venv
 
 # Clean-clone install: installs exactly what pyproject.toml/uv.lock already declare, no
-# mutation. This is the primary documented setup step - see README.
+# mutation. Base dependencies are deliberately minimal (just python-dotenv) - pyspark,
+# delta-spark, and dbt-databricks live in optional-dependency groups (see install-spark/
+# install-dbt below) so the qc_lakehouse wheel built for Databricks Jobs (databricks.yml)
+# doesn't drag in a pyspark pin that conflicts with serverless compute's own immutable
+# package constraints, or an unused dbt-databricks tree. This alone is NOT the full local
+# dev setup - see README for why install-spark/install-dbt are also required.
 install:
 	uv sync
 
-# NOTE: install-baseline/install-spark/install-dbt use `uv add`, which re-resolves and can
-# mutate pyproject.toml/uv.lock. That's fine for adding a genuinely new dependency, but it's
-# the wrong tool for clean-clone setup (use `make install` instead) since it can leave a
-# fresh checkout with an unexpectedly dirty tree.
+# NOTE: install-baseline uses `uv add`, which re-resolves and can mutate pyproject.toml/
+# uv.lock. That's fine for adding a genuinely new dependency, but it's the wrong tool for
+# clean-clone setup (use `make install` instead) since it can leave a fresh checkout with an
+# unexpectedly dirty tree.
 install-baseline:
 	uv add --dev ruff pytest
 	uv add python-dotenv
@@ -21,8 +26,14 @@ check:
 	uv run ruff check .
 	uv run pytest -q
 
+# Installs from the already-declared [project.optional-dependencies] groups via `uv sync`,
+# not `uv add` - the groups are fixed, so this should never mutate pyproject.toml/uv.lock.
+# `uv sync --extra X` alone defaults to exact mode (it also REMOVES packages from any extra
+# not listed), so install-spark and install-dbt each sync BOTH extras together - otherwise
+# running one after the other would uninstall the first one's packages. Either target alone
+# reproduces the full base+spark+dbt environment.
 install-spark:
-	uv add pyspark delta-spark
+	uv sync --extra spark --extra dbt
 
 smoke-local:
 	uv run python scripts/smoke_local.py
@@ -41,9 +52,11 @@ install-databricks:
 smoke-databricks:
 	.venv-databricks/bin/python scripts/smoke_databricks.py
 
+# Same reasoning as install-spark above - syncs both extras together so either target alone
+# reproduces the full environment. `pyyaml` is already declared in [dependency-groups].dev,
+# so plain `uv sync` installs it; no separate `uv add` needed.
 install-dbt:
-	uv add dbt-databricks
-	uv add --dev pyyaml
+	uv sync --extra spark --extra dbt
 
 smoke-dbt:
 	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt debug --project-dir dbt/qc_lakehouse
@@ -88,3 +101,9 @@ dbt-test:
 
 dbt-docs:
 	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt docs generate --project-dir dbt/qc_lakehouse --target qc_dev
+
+bundle-validate:
+	databricks bundle validate
+
+bundle-deploy:
+	databricks bundle deploy -t dev

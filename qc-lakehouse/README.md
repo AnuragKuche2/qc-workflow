@@ -18,7 +18,8 @@ architecture and later sub-projects (B onward).
 ```bash
 cd qc-lakehouse
 make venv               # create the uv-managed .venv, pinned to Python 3.12
-make install             # installs everything already declared in pyproject.toml/uv.lock
+make install             # base install: just python-dotenv + dev tooling (ruff, pytest)
+make install-spark       # adds pyspark + delta-spark, needed for tests/smoke-local/generation
 make check               # confirms the fast test suite is green so far
 
 brew install openjdk@17 # required by local Spark, not installable via uv
@@ -34,9 +35,24 @@ your current terminal - a one-off `export` will not persist across new terminal 
 the next time you open a fresh shell.
 
 `make install` runs `uv sync`, which installs exactly what `pyproject.toml`/`uv.lock` already
-declare with no mutation - the right choice for a clean clone. The `install-baseline`/
-`install-spark`/`install-dbt` Makefile targets still exist (they use `uv add`) but are only
-useful later, if you genuinely want to add a new dependency to the project.
+declare with no mutation - the right choice for a clean clone. Its base dependency set is
+deliberately minimal (just `python-dotenv`) - `pyspark`, `delta-spark`, and `dbt-databricks`
+live in `pyproject.toml`'s `[project.optional-dependencies]` groups instead of the base
+`dependencies` list, so the `qc_lakehouse` wheel built for Databricks Jobs
+(`databricks.yml`) doesn't pull in a `pyspark` pin that conflicts with serverless compute's
+own immutable package constraints. That means **`make install` alone is not enough for the
+full local dev loop**: `make install-spark` (installs the `spark` extra) is required before
+`make check`/`make smoke-local`/the generation scripts will work, and `make install-dbt`
+(installs the `dbt` extra) is required before the dbt steps below. Both use `uv sync
+--extra <name> --extra <other>`, syncing **both** extras together rather than just their own -
+`uv sync --extra X` alone defaults to exact mode, which would remove the *other* extra's
+packages, so running `install-spark` then `install-dbt` (or vice versa) would otherwise leave
+the venv without the first one's packages. Because of this, either target alone installs
+exactly what's already declared, with no mutation, and reproduces the full
+base+spark+dbt environment - running the other one afterward is a no-op. The
+`install-baseline` target (which does use `uv add`, and does mutate `pyproject.toml`/
+`uv.lock`) is separate and only useful if you genuinely want to add a new base dependency to
+the project.
 
 ## Databricks auth
 
@@ -51,12 +67,13 @@ useful later, if you genuinely want to add a new dependency to the project.
 make install-databricks
 make smoke-databricks    # writes/reads a Delta table on serverless compute via Unity Catalog
 
+make install-dbt         # installs dbt-databricks into .venv
 make smoke-dbt           # dbt debug + a trivial dbt run, same Databricks connection
 ```
 
-(`dbt-databricks` is already installed into `.venv` by `make install` above - there's no
-separate `make install-dbt` step needed here; that target only exists for adding a new
-dependency later.)
+`dbt-databricks` is not part of `make install`'s base dependency set - `make install-dbt`
+installs it into the main `.venv` from the `dbt` optional-dependency group before `smoke-dbt`
+(or any other dbt step) will work.
 
 Two things to know about this step:
 

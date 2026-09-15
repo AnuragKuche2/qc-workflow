@@ -4,11 +4,12 @@ version = "0.1.0"
 description = "QC Lakehouse - Databricks + dbt hero quick-commerce data pipeline"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "dbt-databricks>=1.12.5",
-    "delta-spark>=4.4.0",
-    "pyspark>=4.2.0",
     "python-dotenv>=1.2.3",
 ]
+
+[project.optional-dependencies]
+spark = ["pyspark>=4.2.0", "delta-spark>=4.4.0"]
+dbt = ["dbt-databricks>=1.12.5"]
 
 [build-system]
 requires = ["hatchling"]
