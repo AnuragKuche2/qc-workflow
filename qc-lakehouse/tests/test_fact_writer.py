@@ -56,6 +56,14 @@ def test_check_fact_referential_integrity_catches_an_orphaned_order_item():
         check_fact_referential_integrity(orders, order_items, [], [], [])
 
 
+def test_check_fact_referential_integrity_catches_an_orphaned_refund_payment():
+    orders = [_order(1)]
+    payments = [{"payment_id": 1, "order_id": 1}]
+    refunds = [{"refund_id": 1, "order_id": 1, "payment_id": 999}]
+    with pytest.raises(AssertionError, match="payment"):
+        check_fact_referential_integrity(orders, [], [], payments, refunds)
+
+
 def test_check_exactly_one_accepted_match_per_matched_order_passes():
     orders = [_order(1, status="DELIVERED"), _order(2, status="UNFULFILLED")]
     matches = [

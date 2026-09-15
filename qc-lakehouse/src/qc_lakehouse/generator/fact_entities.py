@@ -82,12 +82,9 @@ def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaur
     )
 
     # Restaurant popularity and customer order-propensity: cumulative-threshold inverse-CDF
-    # bucketing, same idea customers.py uses for zone assignment, but resolved via a
-    # driver-side binary search UDF (see _weighted_pick_udf) rather than a broadcast join -
-    # a broadcast INEQUALITY join here would plan as a BroadcastNestedLoopJoin
-    # (O(rows_left * rows_right), infeasible at production order-count x customer-count
-    # scale). Both reference tables are small enough (thousands / low hundred-thousands of
-    # rows) to collect and prefix-sum driver-side in well under a second.
+    # bucketing, same idea customers.py uses for zone assignment, resolved via
+    # _weighted_pick_table's broadcast equi-join (see its docstring for why an inequality
+    # join would be infeasible at this scale).
     #
     # Weights are normalized by their own sum before accumulating, so the cumulative
     # thresholds always land in [0, 1] - the same range as the uniform draw in `_h`.

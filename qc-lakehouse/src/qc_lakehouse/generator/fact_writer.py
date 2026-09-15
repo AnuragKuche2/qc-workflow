@@ -41,8 +41,8 @@ def check_order_volume_matches_demand(order_buckets, demand_hourly) -> None:
 
 
 def check_fact_referential_integrity(orders, order_items, match_attempts, payments, refunds) -> None:
-    """Every fact row must reference a real order. Runs against collected rows before
-    anything is written."""
+    """Every fact row must reference a real order, and every refund must also reference a
+    real payment. Runs against collected rows before anything is written."""
     order_ids = {r["order_id"] for r in orders}
 
     orphan_items = [r["order_item_id"] for r in order_items if r["order_id"] not in order_ids]
@@ -56,6 +56,10 @@ def check_fact_referential_integrity(orders, order_items, match_attempts, paymen
 
     orphan_refunds = [r["refund_id"] for r in refunds if r["order_id"] not in order_ids]
     assert not orphan_refunds, f"refund -> order orphans: {orphan_refunds[:5]}"
+
+    payment_ids = {r["payment_id"] for r in payments}
+    orphan_refund_payments = [r["refund_id"] for r in refunds if r["payment_id"] not in payment_ids]
+    assert not orphan_refund_payments, f"refund -> payment orphans: {orphan_refund_payments[:5]}"
 
 
 def check_exactly_one_accepted_match_per_matched_order(orders, match_attempts) -> None:
@@ -104,11 +108,13 @@ def _write(spark, config: GeneratorConfig, name: str, df, schema) -> int:
     schema)` round-trip was a no-op re-materialization that doesn't even work on Databricks
     serverless/Standard-access-mode compute (`DataFrame.rdd` raises RDD_NOT_SUPPORTED there -
     this is what broke the live run). The assertion below is a cheap safety net for the same
-    guarantee that round-trip was reaching for, without needing the RDD API to get it."""
-    actual_names = [f.name for f in df.schema.fields]
-    expected_names = [f.name for f in schema.fields]
-    assert actual_names == expected_names, (
-        f"{name}: DataFrame columns {actual_names} do not match expected schema columns {expected_names}"
+    guarantee that round-trip was reaching for, without needing the RDD API to get it - it
+    checks both column names and types, so a type regression (e.g. a decimal precision widen)
+    fails loudly here instead of landing silently in the Delta table."""
+    actual = [(f.name, f.dataType) for f in df.schema.fields]
+    expected = [(f.name, f.dataType) for f in schema.fields]
+    assert actual == expected, (
+        f"{name}: DataFrame columns {actual} do not match expected schema columns {expected}"
     )
     table = f"{config.catalog}.{config.schema}.{name}"
     (df.write.mode("overwrite")
