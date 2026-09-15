@@ -236,7 +236,12 @@ def finalize_orders(config: GeneratorConfig, orders_shell_df, order_items_df):
     written to Delta."""
     seed = config.seed
 
-    subtotals = order_items_df.groupBy("order_id").agg(F.sum("line_total").alias("subtotal"))
+    # F.sum() on a decimal(18,2) column widens the inferred result type to decimal(28,2)
+    # (extra headroom for the aggregate) - cast back down to match ORDERS_SCHEMA's
+    # subtotal decimal(18,2), same as commission_amount/order_total below.
+    subtotals = order_items_df.groupBy("order_id").agg(
+        F.sum("line_total").cast("decimal(18,2)").alias("subtotal")
+    )
 
     orders = (
         orders_shell_df
