@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: int_order_matching
+    description: >
+      One row per order, resolving its ACCEPTED match attempt (if any) and total attempt
+      count. UNFULFILLED orders have was_matched = false and all accepted_* columns null.
+    columns:
+      - name: order_id
+        description: Primary key (one row per order).
+        tests: [unique, not_null]
+      - name: total_attempts
+        tests: [not_null]
+      - name: was_matched
+        tests: [not_null]
