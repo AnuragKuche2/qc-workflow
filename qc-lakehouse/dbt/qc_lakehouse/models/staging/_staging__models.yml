@@ -139,3 +139,42 @@ models:
           - relationships:
               to: ref('stg_zones')
               field: zone_id
+
+  - name: stg_orders
+    description: >
+      One row per order. delivery_notes has the text-noise defect (casing/whitespace
+      mangling) cleaned - was_text_noise_defect flags which rows needed it, for auditability.
+    columns:
+      - name: order_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: customer_id
+        description: Foreign key to customers.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+      - name: restaurant_id
+        description: Foreign key to restaurants.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_restaurants')
+              field: restaurant_id
+      - name: zone_id
+        description: Foreign key to zones.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_zones')
+              field: zone_id
+      - name: order_status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['DELIVERED', 'CANCELLED', 'UNFULFILLED']
+      - name: subtotal
+        tests: [not_null]
+      - name: order_total
+        tests: [not_null]
