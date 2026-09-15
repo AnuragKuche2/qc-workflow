@@ -1,6 +1,6 @@
 # QC Lakehouse (Databricks-Hero) - Design
 
-**Status:** Sub-project A built and merged. Sub-project B's spine (reference-data layer, section 6) built and merged. Widen step W1a (money-chain fact tables, section 6.6) is designed, pending review. W1b (order_events/courier_shifts/gps_pings + Auto Loader/streaming) not yet designed. Sub-projects C-H are decomposed below but not yet individually designed. Build order is fixed: A -> B -> C -> E -> H -> D -> G -> F (see section 4).
+**Status:** Sub-project A built and merged. **B1** (spine, section 6) and **W1a** (money-chain fact tables, section 6.6) built and merged. **C** (dbt medallion, section 8) built and merged. **E1** (Airflow triggering B1+C via Databricks Jobs, section 9) is designed, pending implementation. **B2**/W1b (order_events/courier_shifts/gps_pings + Auto Loader, **streaming**) and **E2** (Airflow triggering/monitoring B2 once it exists, **streaming**) are deferred - not yet designed. D, G, H, F are decomposed below but not yet individually designed. Build order is fixed: A -> B -> C -> E -> H -> D -> G -> F (see section 4).
 
 ## 1. Background
 
@@ -576,7 +576,91 @@ Orchestrating dbt runs on a schedule (Sub-project E). Text-to-SQL access to gold
 - `make check`-equivalent dbt coverage: `dbt test` runs cleanly as part of this sub-project's
   own CI-able check command.
 
-## 9. Open questions for later sub-projects (not blocking A or B)
+## 9. Sub-project E (E1): Orchestration - Dockerized Airflow triggering Databricks Jobs - detailed design
+
+**Labeling convention (applies project-wide from this point on):** each sub-project's parts
+are labeled `<Letter><N>`, and any part involving streaming is tagged explicitly rather than
+left implicit. **B1** = the spine reference-data generator (done). **B2** = W1b,
+`order_events`/`courier_shifts`/`gps_pings` via Auto Loader (pending, **streaming**). **E1** =
+this section's scope - Airflow triggering the existing B1 (batch) and C jobs. **E2** = a future
+addition to this same DAG, once B2 exists, to trigger/monitor that streaming job (not yet
+scoped, **streaming**, deferred until B2 is built - not a separate sub-project, per section 4's
+existing note about D/G getting similar small follow-up additions to E later).
+
+**E1 scope boundary:** section 4's one-liner for E says "triggering Databricks Jobs for
+ingestion/dbt/AI/text-to-SQL tasks" - but D (AI) and G (text-to-SQL) don't exist yet. Per
+section 4's own build-order note, D and G each get a small follow-up addition to this DAG once
+they're built, rather than this pass trying to anticipate their shape. E1 is scoped to
+ingestion (B1) + dbt (C) triggers only.
+
+### Architecture
+
+- **Databricks Asset Bundles (DABs)** define 4 Databricks Jobs, deployed via
+  `databricks bundle deploy` to the Free Edition workspace, each running on serverless compute:
+  1. `generate_reference_data` - runs the existing `scripts/generate_reference_data.py` (B1)
+  2. `generate_fact_data` - runs `scripts/generate_fact_data.py` (B1/W1a)
+  3. `dbt_run` - dbt's native Databricks Jobs task type, `qc_dev` target
+  4. `dbt_test` - same, `dbt test`
+- **Airflow**, in Docker (SQLite + `SequentialExecutor` - see the metastore decision below),
+  runs a single DAG (`qc_lakehouse_pipeline`) with 4 tasks using `DatabricksRunNowOperator`
+  (from `apache-airflow-providers-databricks`) - Airflow only triggers and polls; all compute
+  stays on Databricks, matching section 3's constraint ("compute always happens on Databricks,
+  never in the Airflow containers").
+- Task order: `generate_reference_data >> generate_fact_data >> dbt_run >> dbt_test` (fact data
+  reads reference tables; dbt reads bronze written by both).
+- Trigger: manual only (`schedule_interval=None`). The generator is deterministic (same seed ->
+  same data every run), so a recurring cron schedule would just regenerate identical rows each
+  time and burn Free Edition credits for no benefit - the DAG exists to demonstrate real
+  retries/SLAs/dependencies when triggered, not to run unattended on a clock.
+
+### Airflow metastore decision
+
+Section 3 bans local Postgres/Hive metastore, but the standard Airflow docker-compose needs a
+Postgres container for its own scheduler metadata. Resolved as: **SQLite +
+`SequentialExecutor`** - Airflow's officially-supported lightweight local mode, no Postgres
+container at all. Fully respects the constraint, and is right-sized for a 4-task manual-trigger
+DAG that has no concurrency needs.
+
+### Components & auth
+
+- **DAB config** (`qc-lakehouse/databricks.yml`) declares the 4 jobs, targeting
+  `qc_dev.bronze_source`/`silver`/`gold` - the same catalog/schema `GeneratorConfig` and
+  `dbt_project.yml` already use. Jobs run under the workspace's own OAuth identity; no `.env`
+  file is needed inside the job itself.
+- **Airflow's Databricks auth**: the `apache-airflow-providers-databricks` connection needs its
+  own OAuth credentials (an Airflow connection, reusing `DATABRICKS_HOST`, configured once via
+  Airflow's connection UI/CLI - not baked into DAG code).
+
+### Error handling: retries + SLAs
+
+- **Retries**: each task gets `retries=2`, `retry_delay=timedelta(minutes=2)` - a transient
+  Databricks Jobs API hiccup or a flaky serverless cold-start retries automatically without
+  operator intervention (matches section 3's "effectively-once... tasks safe to retry"
+  constraint). Retrying `DatabricksRunNowOperator` is safe because the underlying scripts
+  already overwrite deterministically from a fixed seed - a retry never duplicates data.
+- **SLAs**: each task gets an `sla` timedelta (first-pass estimates: 15 min for
+  `generate_reference_data`, 30 min for `generate_fact_data` at the default ~1.35M-order scale,
+  10 min each for the dbt tasks) and an `sla_miss_callback` that logs a structured warning. No
+  real alerting channel (Slack/PagerDuty) exists for a portfolio project, so the callback is a
+  clearly-labeled stub - it logs what a real system would page on.
+- **Failure propagation**: default Airflow behavior, no `trigger_rule` override - a failed task
+  blocks its downstream tasks, since `dbt_run` genuinely shouldn't run against incomplete
+  bronze data.
+
+### Testing
+
+- **DAG structural test** (pytest, same suite discipline as the rest of the project): load the
+  DAG via `airflow.models.DagBag`, assert it imports without errors, has exactly 4 tasks, and
+  the dependency chain matches. Catches DAG-definition bugs without needing a live Airflow
+  instance.
+- **DAB validation**: `databricks bundle validate` as a `make` target, catching job-config
+  errors before deploy.
+- **Live end-to-end validation** (same pattern as B/C): manually trigger the full DAG once
+  against the real Free Edition workspace, confirm all 4 tasks succeed via the Databricks Jobs
+  API run status, then trigger it a second time to confirm the idempotent-rerun story holds
+  through Airflow too (not just when the scripts are run directly, as W1a already proved).
+
+## 10. Open questions for later sub-projects (not blocking A or B)
 
 - ~~Exact `databricks-connect` version pin depends on the Free Edition workspace's current
   serverless runtime version at implementation time - confirm during A rather than pinning
@@ -610,3 +694,13 @@ Orchestrating dbt runs on a schedule (Sub-project E). Text-to-SQL access to gold
   adds real delivery-completion events, true SLA-adherence measurement (actual vs.
   `sla_target_minutes`, already carried through as a dimension attribute) becomes a small
   natural addition to the existing dbt project, not a redesign.
+- **Found during E's brainstorming:** `generate_reference_data.py`/`generate_fact_data.py`
+  build their Spark session via `databricks.connect.DatabricksSession` (external-client-style
+  connection). Running that *from inside* a Databricks Job that's already executing on
+  Databricks serverless compute is unusual - Databricks Connect is designed for connecting to
+  Databricks from outside it, not for a job to connect to itself. It may work as-is via the
+  job's own OAuth identity, or may need a small fallback: detect "running as a Databricks Job"
+  (Databricks sets `DATABRICKS_RUNTIME_VERSION` automatically) and use a plain
+  `SparkSession.builder.getOrCreate()` instead of Databricks Connect in that case. Validate
+  early in E1's implementation, the same way W1a's UDF-sandbox surprise and C's dbt
+  double-limit quirk were caught early rather than assumed away.
