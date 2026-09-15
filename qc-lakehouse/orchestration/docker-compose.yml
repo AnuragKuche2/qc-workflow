@@ -1,0 +1,23 @@
+services:
+  airflow:
+    image: apache/airflow:3.3.1-python3.12
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      # Local-dev-only mechanism (Airflow's own docs call out this env var as unsuitable for
+      # production images) for adding the Databricks provider without a custom Dockerfile -
+      # fine here since this container is never deployed anywhere, only run locally.
+      _PIP_ADDITIONAL_REQUIREMENTS: apache-airflow-providers-databricks
+      DATABRICKS_HOST: "${DATABRICKS_HOST}"
+    env_file:
+      - .env
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_data:/opt/airflow
+    ports:
+      - "8080:8080"
+    command: standalone
+
+volumes:
+  airflow_data:
