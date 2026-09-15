@@ -1,4 +1,6 @@
 # qc-lakehouse/tests/test_fact_entities.py
+from pyspark.sql import functions as F
+
 from qc_lakehouse.generator.config import GeneratorConfig
 from qc_lakehouse.generator.customers import build_customers
 from qc_lakehouse.generator.entities import (
@@ -9,7 +11,11 @@ from qc_lakehouse.generator.entities import (
     build_riders,
     build_zones,
 )
-from qc_lakehouse.generator.fact_entities import build_order_items, build_orders_shell
+from qc_lakehouse.generator.fact_entities import (
+    build_order_items,
+    build_orders_shell,
+    finalize_orders,
+)
 from qc_lakehouse.generator.schemas import (
     DEMAND_HOURLY_SCHEMA,
     GEN_RESTAURANT_PROFILE_SCHEMA,
@@ -192,5 +198,90 @@ def test_build_order_items_picks_from_the_orders_own_restaurant():
 
         for row in items.select("order_id", "menu_item_id").collect():
             assert menu_restaurant[row["menu_item_id"]] == order_restaurant[row["order_id"]]
+    finally:
+        spark.stop()
+
+
+def test_finalize_orders_subtotal_equals_sum_of_line_totals():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+
+        item_subtotals = {
+            r["order_id"]: r["subtotal"]
+            for r in items.groupBy("order_id").agg(F.sum("line_total").alias("subtotal")).collect()
+        }
+        for row in orders.select("order_id", "subtotal").collect():
+            assert row["subtotal"] == item_subtotals[row["order_id"]]
+    finally:
+        spark.stop()
+
+
+def test_finalize_orders_order_total_equals_subtotal_plus_delivery_fee():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+
+        for row in orders.select("subtotal", "delivery_fee", "order_total").collect():
+            assert row["order_total"] == row["subtotal"] + row["delivery_fee"]
+    finally:
+        spark.stop()
+
+
+def test_finalize_orders_has_the_full_orders_schema_columns():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config()
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+
+        expected = {
+            "order_id", "order_ref", "customer_id", "restaurant_id", "zone_id", "placed_at",
+            "order_status", "subtotal", "delivery_fee", "commission_pct", "commission_amount",
+            "order_total", "delivery_notes",
+        }
+        assert set(orders.columns) == expected
+    finally:
+        spark.stop()
+
+
+def test_finalize_orders_applies_text_noise_defect_at_the_configured_rate():
+    spark = build_local_spark_session()
+    try:
+        config = _tiny_config(text_noise_defect_rate=1.0)   # force every note to be mangled
+        fx = _build_reference_fixtures(spark, config)
+        shell = build_orders_shell(
+            spark, config, fx["demand_hourly_df"], fx["restaurant_profile_df"],
+            fx["customer_profile_df"], fx["customers_df"], fx["zones_df"], fx["restaurants_df"],
+        )
+        items = build_order_items(config, shell, fx["menu_items_df"])
+        orders = finalize_orders(config, shell, items)
+
+        notes = [r["delivery_notes"] for r in orders.select("delivery_notes").collect() if r["delivery_notes"]]
+        assert notes    # at least one order got a note
+        # every non-null note must show a mangling signature: fully upper, fully lower,
+        # or surrounded by extra whitespace - never the clean original casing/spacing
+        for n in notes:
+            mangled = n.isupper() or n.islower() or n != n.strip()
+            assert mangled, f"note not mangled: {n!r}"
     finally:
         spark.stop()

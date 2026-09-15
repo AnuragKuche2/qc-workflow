@@ -5,9 +5,10 @@ import bisect
 
 from pyspark.sql import Window
 from pyspark.sql import functions as F
-from pyspark.sql.types import LongType
+from pyspark.sql.types import LongType, StringType
 
 from qc_lakehouse.generator.config import GeneratorConfig
+from qc_lakehouse.generator.defects import mangle_text_casing_and_whitespace
 
 
 def _h(col, salt: int):
@@ -225,4 +226,43 @@ def build_order_items(config: GeneratorConfig, orders_shell_df, menu_items_df):
 
     return exploded.select(
         "order_item_id", "order_id", "menu_item_id", "quantity", "unit_price", "line_total",
+    )
+
+
+def finalize_orders(config: GeneratorConfig, orders_shell_df, order_items_df):
+    """Joins order_items' aggregated subtotal back onto the shell, computes
+    commission_amount and order_total, and applies the text-noise defect to
+    delivery_notes. This is the FINAL orders DataFrame - the shell alone is never
+    written to Delta."""
+    seed = config.seed
+
+    subtotals = order_items_df.groupBy("order_id").agg(F.sum("line_total").alias("subtotal"))
+
+    orders = (
+        orders_shell_df
+        .join(subtotals, "order_id")
+        .withColumn("commission_amount", (F.col("subtotal") * F.col("commission_pct")).cast("decimal(18,2)"))
+        .withColumn("order_total", (F.col("subtotal") + F.col("delivery_fee")).cast("decimal(18,2)"))
+        .withColumn("order_ref", F.format_string("O-%07d", F.col("order_id")))
+    )
+
+    mangle_udf = F.udf(
+        lambda text, mode: mangle_text_casing_and_whitespace(text, mode) if text is not None else None,
+        StringType(),
+    )
+    u_defect = _h(F.col("order_id"), seed + 301)
+    mode_idx = F.pmod(F.hash("order_id", F.lit(seed + 302)), F.lit(4))
+    modes = F.array(*[F.lit(m) for m in ["UPPER", "LOWER", "LEADING_SPACE", "TRAILING_SPACE"]])
+    orders = orders.withColumn(
+        "delivery_notes",
+        F.when(
+            F.col("delivery_notes").isNotNull() & (u_defect < F.lit(config.text_noise_defect_rate)),
+            mangle_udf(F.col("delivery_notes"), F.element_at(modes, mode_idx + F.lit(1))),
+        ).otherwise(F.col("delivery_notes")),
+    )
+
+    return orders.select(
+        "order_id", "order_ref", "customer_id", "restaurant_id", "zone_id", "placed_at",
+        "order_status", "subtotal", "delivery_fee", "commission_pct", "commission_amount",
+        "order_total", "delivery_notes",
     )
