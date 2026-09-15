@@ -5,10 +5,8 @@ import bisect
 
 from pyspark.sql import Window
 from pyspark.sql import functions as F
-from pyspark.sql.types import LongType, StringType
 
 from qc_lakehouse.generator.config import GeneratorConfig
-from qc_lakehouse.generator.defects import format_refund_amount, mangle_text_casing_and_whitespace
 
 
 def _h(col, salt: int):
@@ -18,30 +16,34 @@ def _h(col, salt: int):
     return F.pmod(F.hash(col, F.lit(salt)), F.lit(1_000_000)) / 1_000_000.0
 
 
-def _weighted_pick_udf(cum_pairs: list[tuple[int, float]]):
+def _weighted_pick_table(spark, cum_pairs: list[tuple[int, float]], bucket_col: str, id_col: str):
     """cum_pairs: (id, cumulative_threshold) tuples, already sorted ascending by threshold,
-    last threshold ~1.0. Returns a Spark UDF mapping a uniform [0,1) draw to the id of the
-    smallest threshold that clears it.
+    last threshold ~1.0. Returns a small Spark DataFrame mapping every possible discretized
+    draw value to the id whose cumulative threshold first clears it.
 
-    This replaces an earlier broadcast-inequality-join approach (`draw_col <= cum`, picking
-    the top-1 by a window function). That join has no equality predicate, so Spark plans it
-    as a BroadcastNestedLoopJoin: O(rows_left * rows_right) pairwise evaluations. At
-    production GeneratorConfig defaults that's ~1.35M orders x 300,000 customers for the
-    customer-weighting step alone - on the order of 4x10^11 pairwise evaluations before the
-    window-based top-1 filter even runs, a serious risk of timing out or failing outright on
-    a live Databricks run. A driver-side binary search via bisect is O(log n) per row and
-    needs no join at all - the cumulative table only has to exist once, broadcast as a
-    Python closure captured in the UDF, not as a Spark DataFrame."""
+    `_h(col, salt)` never produces a truly continuous uniform draw - it divides an integer
+    hash bucket by 1_000_000, so it only ever takes one of exactly 1,000,000 distinct values.
+    That means the entire domain of `pick(draw)` (what the old UDF computed per row) can be
+    precomputed once as a 1,000,000-row table (bucket -> id) instead of computed per row.
+    Joining on that table by plain integer equality lets Spark plan it as a broadcast hash
+    join - avoiding both a Python UDF (broken on this workspace's serverless compute, whose
+    sandbox container fails to start with ISOLATION_STARTUP_FAILURE.SANDBOX_STARTUP) and the
+    BroadcastNestedLoopJoin an inequality join would produce (Task 3's original O(rows_left *
+    rows_right) problem - see the git history of this file). This produces the exact same
+    id for the exact same draw as the old bisect-based UDF did, just precomputed for the
+    whole domain up front rather than called per row."""
     ids = [p[0] for p in cum_pairs]
     thresholds = [p[1] for p in cum_pairs]
 
-    def pick(draw: float) -> int:
+    rows = []
+    for bucket in range(1_000_000):
+        draw = bucket / 1_000_000.0
         idx = bisect.bisect_left(thresholds, draw)
         if idx >= len(ids):
             idx = len(ids) - 1
-        return ids[idx]
+        rows.append((bucket, ids[idx]))
 
-    return F.udf(pick, LongType())
+    return spark.createDataFrame(rows, f"{bucket_col} int, {id_col} long")
 
 
 def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaurant_profile_df,
@@ -113,16 +115,21 @@ def build_orders_shell(spark, config: GeneratorConfig, demand_hourly_df, restaur
         customer_profile_df.select("customer_id", "order_propensity").collect(),
         "customer_id", "order_propensity",
     )
-    restaurant_pick_udf = _weighted_pick_udf(restaurant_cum)
-    customer_pick_udf = _weighted_pick_udf(customer_cum)
+    restaurant_pick_table = F.broadcast(
+        _weighted_pick_table(spark, restaurant_cum, "restaurant_bucket", "restaurant_id")
+    )
+    customer_pick_table = F.broadcast(
+        _weighted_pick_table(spark, customer_cum, "customer_bucket", "customer_id")
+    )
 
     orders = (
         exploded
-        .withColumn("u_restaurant", _h(F.col("order_id"), seed + 101))
-        .withColumn("restaurant_id", restaurant_pick_udf(F.col("u_restaurant")))
-        .withColumn("u_customer", _h(F.col("order_id"), seed + 102))
-        .withColumn("customer_id", customer_pick_udf(F.col("u_customer")))
-        .drop("u_restaurant", "u_customer")
+        .withColumn("restaurant_bucket", F.pmod(F.hash(F.col("order_id"), F.lit(seed + 101)), F.lit(1_000_000)))
+        .join(restaurant_pick_table, "restaurant_bucket")
+        .drop("restaurant_bucket")
+        .withColumn("customer_bucket", F.pmod(F.hash(F.col("order_id"), F.lit(seed + 102)), F.lit(1_000_000)))
+        .join(customer_pick_table, "customer_bucket")
+        .drop("customer_bucket")
     )
 
     orders = (
@@ -251,18 +258,21 @@ def finalize_orders(config: GeneratorConfig, orders_shell_df, order_items_df):
         .withColumn("order_ref", F.format_string("O-%07d", F.col("order_id")))
     )
 
-    mangle_udf = F.udf(
-        lambda text, mode: mangle_text_casing_and_whitespace(text, mode) if text is not None else None,
-        StringType(),
-    )
     u_defect = _h(F.col("order_id"), seed + 301)
     mode_idx = F.pmod(F.hash("order_id", F.lit(seed + 302)), F.lit(4))
-    modes = F.array(*[F.lit(m) for m in ["UPPER", "LOWER", "LEADING_SPACE", "TRAILING_SPACE"]])
+    # mode_idx 0/1/2/3 map to the same 4 modes, in the same order, as
+    # defects.py's mangle_text_casing_and_whitespace: UPPER/LOWER/LEADING_SPACE/TRAILING_SPACE.
+    mangled = (
+        F.when(mode_idx == 0, F.upper(F.col("delivery_notes")))
+         .when(mode_idx == 1, F.lower(F.col("delivery_notes")))
+         .when(mode_idx == 2, F.concat(F.lit("   "), F.col("delivery_notes")))
+         .otherwise(F.concat(F.col("delivery_notes"), F.lit("   ")))
+    )
     orders = orders.withColumn(
         "delivery_notes",
         F.when(
             F.col("delivery_notes").isNotNull() & (u_defect < F.lit(config.text_noise_defect_rate)),
-            mangle_udf(F.col("delivery_notes"), F.element_at(modes, mode_idx + F.lit(1))),
+            mangled,
         ).otherwise(F.col("delivery_notes")),
     )
 
@@ -416,12 +426,12 @@ def build_refunds(config: GeneratorConfig, orders_df, payments_df):
         .withColumn("use_accounting_format", _h(F.col("order_id"), seed + 604) < F.lit(config.money_text_defect_rate))
     )
 
-    format_udf = F.udf(
-        lambda amount, use_accounting: format_refund_amount(amount, bool(use_accounting)),
-        StringType(),
-    )
     joined = joined.withColumn(
-        "refund_amount_raw", format_udf(F.col("refund_amount"), F.col("use_accounting_format")),
+        "refund_amount_raw",
+        F.when(
+            F.col("use_accounting_format"),
+            F.concat(F.lit("("), F.col("refund_amount").cast("string"), F.lit(")")),
+        ).otherwise(F.col("refund_amount").cast("string")),
     )
 
     joined = joined.withColumn(
