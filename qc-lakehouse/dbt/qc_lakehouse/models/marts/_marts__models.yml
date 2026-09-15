@@ -79,3 +79,35 @@ models:
               field: date_day
       - name: net_revenue
         tests: [not_null]
+
+  - name: fct_deliveries
+    description: >
+      Delivery-operations fact - grain is one row per order's match outcome. Deliberately
+      does NOT measure delivery-completion SLA - no such timestamp exists in bronze data yet
+      (see spec section 9). Measures match acceptance, attempts-per-order, time-to-accept only.
+    columns:
+      - name: order_id
+        description: Primary key (one row per order).
+        tests: [unique, not_null]
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+      - name: restaurant_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_restaurant')
+              field: restaurant_id
+      - name: was_matched
+        tests: [not_null]
+      - name: total_attempts
+        tests: [not_null]
+      - name: zone_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_zone')
+              field: zone_id
