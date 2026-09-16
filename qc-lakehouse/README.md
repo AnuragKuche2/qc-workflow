@@ -105,8 +105,9 @@ make smoke-all
 
 ## What's not here yet
 
-Real data generation, dbt medallion models, Airflow/Docker orchestration, and the AI/RAG
-layer are separate sub-projects (B-H) - see the design spec.
+The AI/RAG layer (Sub-projects F-H) is not yet built - see the design spec. Streaming
+ingestion and its Airflow trigger (Sub-project B2/W1b, E2) aren't built either - see the
+"Not yet built" note in "Airflow DAG orchestration" below for details.
 
 ## Reference data generator (Sub-project B spine)
 
@@ -187,12 +188,55 @@ Requires `make generate-reference-data` and `make generate-fact-data` to have be
 locally it comes from the `PII_HASH_SALT` env var (`.env`), and dbt fails loudly if that isn't
 set (see `dbt_project.yml`). Never commit a real value for it.
 
+## Airflow DAG orchestration (Sub-project E1)
+
+Dockerized Airflow triggers 4 Databricks Jobs - `generate_reference_data`, `generate_fact_data`
+(Sub-project B1), `dbt_run`, `dbt_test` (Sub-project C) - via the Databricks Jobs API, in a
+single sequential DAG (`orchestration/dags/qc_lakehouse_pipeline.py`). Compute always happens on
+Databricks; Airflow only triggers and polls.
+
+Setup:
+
+```bash
+make install-airflow        # isolated .venv-airflow, for local DAG validation only
+make bundle-validate        # validates databricks.yml
+make bundle-deploy          # deploys the 4 jobs to the qc_dev workspace, serverless compute
+cd orchestration && cp .env.example .env   # fill in DATABRICKS_HOST
+docker compose up -d        # brings up Airflow at localhost:8080
+```
+
+Then configure the `databricks_default` Airflow connection (Admin -> Connections in the UI, or
+`airflow connections add`: connection type `Databricks`, host your workspace URL, and a
+personal access token or OAuth token in the `token` extra), unpause `qc_lakehouse_pipeline`, and
+trigger it from the UI or `docker compose exec airflow airflow dags trigger
+qc_lakehouse_pipeline`. A `databricks auth token` U2M OAuth token is short-lived - if the
+container stays up for a long time (this pipeline's own live validation run took long enough to
+hit this), re-run the same connection setup with a fresh token rather than debugging a
+`403 Invalid Token` failure as something else.
+
+The DAG is manually-triggered only (no cron schedule) - the generator is deterministic, so a
+recurring schedule would just regenerate identical data. Each task has 2 retries with a
+2-minute delay, and the DAG has a logged deadline-miss warning (Airflow 3's replacement for the
+removed SLA feature - no live alerting channel exists for this portfolio project, so the
+callback logs what a production system would page on).
+
+`databricks.yml`'s `dev` target intentionally does not use bundle `mode: development` - that
+mode prefixes every deployed job's display name with `[dev <username>]`, which breaks the DAG's
+`DatabricksRunNowOperator(job_name=...)` exact-name lookups. Live-verified end to end: a clean
+run and an idempotent rerun of the full DAG both succeeded with matching row counts, and an
+induced job-name failure confirmed the 2 retries actually engage (2-minute delay between
+attempts) before the task and its downstream dependents correctly fail.
+
+Not yet built: B2/W1b (streaming ingestion) and E2 (this DAG's future extension to trigger that
+streaming job) - see the design spec's section 9/10 open items.
+
 ## dbt jobs on Databricks (Sub-project E1)
 
 `databricks.yml` deploys `dbt_run` and `dbt_test` as Databricks Jobs (dbt's native `dbt_task`
 type, serverless, against the same `qc_dev` target as `make dbt-run`/`make dbt-test` above) -
-triggerable via `databricks bundle run dbt_run -t dev` / `dbt_test -t dev`, and later triggered
-by an Airflow DAG.
+triggerable via `databricks bundle run dbt_run -t dev` / `dbt_test -t dev`, and end-to-end
+live-verified as the last two steps of the `qc_lakehouse_pipeline` Airflow DAG - see "Airflow
+DAG orchestration" above.
 
 Because the `dbt_task` type has no field to reference a Databricks secret directly, and
 `{{secrets/scope/key}}` isn't resolved inside its `commands`, each job runs a small
