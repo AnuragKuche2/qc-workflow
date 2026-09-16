@@ -106,11 +106,11 @@ make smoke-all
 
 ## What's not here yet
 
-Sub-projects D (AI review-issue layer) and F-H (Polish, text-to-SQL agent, performance/cost
-lab) are not yet built - see the design spec (H is next in the chosen build order
-A -> B -> C -> E -> H -> D -> G -> F). Streaming ingestion and its Airflow trigger
-(Sub-project B2/W1b, E2) aren't built either - see the "Not yet built" note in "Airflow DAG
-orchestration" below for details.
+Sub-projects D (AI review-issue layer), G (text-to-SQL agent), and F (Polish) are not yet
+built - see the design spec (build order A -> B -> C -> E -> H -> D -> G -> F; H, the
+performance/cost lab, is done - see "Performance, maintenance & cost lab" below). Streaming
+ingestion and its Airflow trigger (Sub-project B2/W1b, E2) aren't built either - see the "Not
+yet built" note in "Airflow DAG orchestration" below for details.
 
 ## Reference data generator (Sub-project B spine)
 

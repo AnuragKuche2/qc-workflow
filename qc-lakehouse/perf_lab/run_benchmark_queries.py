@@ -38,10 +38,10 @@ import uuid
 
 from databricks.sdk import WorkspaceClient
 
+from perf_lab._shared import WAREHOUSE_ID
 from qc_lakehouse.config import load_settings
 from qc_lakehouse.databricks_session import is_running_on_databricks
 
-WAREHOUSE_ID = "ca865a4ef1668613"
 CATALOG, SCHEMA = "qc_dev", "perf_bench"
 LAYOUTS = ["orders_bench_baseline", "orders_bench_partitioned", "orders_bench_zorder", "orders_bench_liquid"]
 

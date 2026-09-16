@@ -7,6 +7,14 @@ artifacts:
     build: uv build --wheel
     path: .
 
+variables:
+  warehouse_id:
+    description: >-
+      SQL warehouse ID used by the dbt_run/dbt_test jobs. Databricks UI: SQL Warehouses ->
+      your warehouse -> Connection details -> HTTP Path (the ID is the trailing path segment).
+      Override via `databricks bundle deploy --var="warehouse_id=..."` for a different workspace.
+    default: ca865a4ef1668613
+
 resources:
   jobs:
     generate_reference_data:
@@ -62,7 +70,7 @@ resources:
             project_directory: ./dbt/qc_lakehouse
             commands:
               - "dbt run --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
-            warehouse_id: ca865a4ef1668613
+            warehouse_id: ${var.warehouse_id}
             catalog: qc_dev
             schema: silver
           environment_key: qc_lakehouse_dbt_env
@@ -98,7 +106,7 @@ resources:
             project_directory: ./dbt/qc_lakehouse
             commands:
               - "dbt test --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
-            warehouse_id: ca865a4ef1668613
+            warehouse_id: ${var.warehouse_id}
             catalog: qc_dev
             schema: silver
           environment_key: qc_lakehouse_dbt_env

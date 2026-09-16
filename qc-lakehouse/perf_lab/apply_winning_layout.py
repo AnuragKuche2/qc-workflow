@@ -29,10 +29,10 @@ from __future__ import annotations
 
 from databricks.sdk import WorkspaceClient
 
+from perf_lab._shared import WAREHOUSE_ID
 from qc_lakehouse.config import load_settings
 from qc_lakehouse.databricks_session import is_running_on_databricks
 
-WAREHOUSE_ID = "ca865a4ef1668613"
 FCT_ORDERS = "qc_dev.gold.fct_orders"
 ZORDER_COLUMN = "zone_id"
 

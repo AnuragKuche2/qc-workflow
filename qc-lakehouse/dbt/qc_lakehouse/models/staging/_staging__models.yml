@@ -268,13 +268,19 @@ models:
           - relationships:
               to: ref('stg_orders')
               field: order_id
+      - name: amount
+        tests: [not_null]
+      - name: method
+        description: Payment method used for this transaction.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['upi', 'card', 'wallet', 'cod']
       - name: status
         tests:
           - not_null
           - accepted_values:
               values: ['SUCCESS', 'FAILED']
-      - name: amount
-        tests: [not_null]
 
   - name: stg_refunds
     description: >
