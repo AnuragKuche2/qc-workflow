@@ -1,0 +1,36 @@
+name: "qc_lakehouse"
+version: "1.0.0"
+config-version: 2
+profile: "qc_lakehouse"
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# pii_hash_salt has no hardcoded default - it must come from somewhere at run time. Locally
+# (make dbt-run/dbt-test), it falls back to the PII_HASH_SALT env var sourced from .env, which
+# still fails loudly (dbt's env_var with no default errors if unset) if that isn't set. As a
+# Databricks Job (dbt_run/dbt_test in databricks.yml), the job's `--vars` flag overrides this
+# default entirely with a task-value reference (resolved by a preceding resolve_secrets task
+# that reads the actual Databricks Secret - see scripts/resolve_pii_salt.py), so the env var
+# is never needed there. Note: that task-value substitution is plaintext in the dbt task's own
+# run logs, not a fully-protected secret reference - see resolve_pii_salt.py's docstring.
+vars:
+  pii_hash_salt: "{{ env_var('PII_HASH_SALT') }}"
+
+models:
+  qc_lakehouse:
+    example:
+      +materialized: view
+      +enabled: "{{ target.name == 'dev' }}"
+    staging:
+      +materialized: view
+      +schema: silver
+    intermediate:
+      +materialized: view
+      +schema: silver
+    marts:
+      +materialized: table
+      +schema: gold

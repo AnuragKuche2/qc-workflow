@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: int_order_matching
+    description: >
+      One row per order, resolving its ACCEPTED match attempt (if any) and total attempt
+      count. UNFULFILLED orders have was_matched = false and all accepted_* columns null.
+    columns:
+      - name: order_id
+        description: Primary key (one row per order).
+        tests: [unique, not_null]
+      - name: total_attempts
+        tests: [not_null]
+      - name: was_matched
+        tests: [not_null]
+
+  - name: int_order_economics
+    description: >
+      One row per order with the full money picture - subtotal/fees carried from stg_orders,
+      refunds summed from stg_refunds, net_revenue computed as order_total minus refunds.
+    columns:
+      - name: order_id
+        description: Primary key (one row per order).
+        tests: [unique, not_null]
+      - name: net_revenue
+        tests: [not_null]
+      - name: refund_amount
+        tests: [not_null]

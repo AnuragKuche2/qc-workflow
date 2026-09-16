@@ -1,0 +1,317 @@
+version: 2
+
+models:
+  - name: stg_cities
+    description: One row per city, 1:1 with bronze cities, no cleaning needed.
+    columns:
+      - name: city_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: name
+        tests: [not_null]
+      - name: country_code
+        tests: [not_null]
+      - name: timezone
+        tests: [not_null]
+
+  - name: stg_zones
+    description: One row per zone, 1:1 with bronze zones, no cleaning needed.
+    columns:
+      - name: zone_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: city_id
+        description: Foreign key to cities.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_cities')
+              field: city_id
+      - name: is_active
+        tests: [not_null]
+
+  - name: stg_restaurants
+    description: >
+      One row per restaurant, 1:1 with bronze restaurants. Deliberately excludes
+      popularity_weight/price_index - those are generator-only internals this project must
+      never source.
+    columns:
+      - name: restaurant_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: zone_id
+        description: Foreign key to zones.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_zones')
+              field: zone_id
+      - name: cuisine_type
+        tests: [not_null]
+      - name: commission_pct
+        tests: [not_null]
+
+  - name: stg_riders
+    description: One row per rider, 1:1 with bronze riders, no cleaning needed.
+    columns:
+      - name: rider_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: home_zone_id
+        description: Foreign key to zones.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_zones')
+              field: zone_id
+      - name: vehicle_type
+        tests: [not_null]
+      - name: payout_tier
+        description: Foreign key to rider_payout_tiers.tier.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_rider_payout_tiers')
+              field: tier
+
+  - name: stg_menu_items
+    description: One row per menu item, 1:1 with bronze menu_items, no cleaning needed.
+    columns:
+      - name: menu_item_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: restaurant_id
+        description: Foreign key to restaurants.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_restaurants')
+              field: restaurant_id
+      - name: price
+        tests: [not_null]
+
+  - name: stg_rider_payout_tiers
+    description: Rider payout rate card, 1:1 with bronze rider_payout_tiers.
+    columns:
+      - name: tier
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: base_fare
+        tests: [not_null]
+
+  - name: stg_demand_daily
+    description: Daily order-volume curve, 1:1 with bronze demand_daily.
+    columns:
+      - name: day_index
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_date
+        tests: [unique, not_null]
+
+  - name: stg_demand_hourly
+    description: >
+      Hourly order-volume curve, 1:1 with bronze demand_hourly. Grain is (day_index, hour).
+    columns:
+      - name: day_index
+        tests: [not_null]
+      - name: hour
+        tests: [not_null]
+      - name: orders
+        tests: [not_null]
+
+  - name: stg_customers
+    description: >
+      One row per customer. email/phone are masked here and never appear unmasked in this or
+      any downstream model - email_hash is a salted one-way SHA-256 hash (salt from the
+      PII_HASH_SALT env var, never committed), phone_masked keeps the country code and last
+      3 digits visible with the middle digits starred out. full_name and precise lat/lon are
+      NOT masked and flow through to dim_customer in gold - this is the project's current
+      PII boundary by design, not an oversight.
+    columns:
+      - name: customer_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: email_hash
+        tests: [not_null]
+      - name: phone_masked
+        tests: [not_null]
+      - name: home_zone_id
+        description: Foreign key to zones.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_zones')
+              field: zone_id
+
+  - name: stg_orders
+    description: >
+      One row per order. delivery_notes has the text-noise defect (casing/whitespace
+      mangling) cleaned - was_text_noise_defect flags which rows needed it, for auditability.
+    columns:
+      - name: order_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: customer_id
+        description: Foreign key to customers.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+      - name: restaurant_id
+        description: Foreign key to restaurants.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_restaurants')
+              field: restaurant_id
+      - name: zone_id
+        description: Foreign key to zones.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_zones')
+              field: zone_id
+      - name: order_status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['DELIVERED', 'CANCELLED', 'UNFULFILLED']
+      - name: subtotal
+        tests: [not_null]
+      - name: order_total
+        tests: [not_null]
+      - name: delivery_notes
+        description: >
+          Recovered from the text-noise defect via a first-letter-upper/rest-lower
+          transform, which only reconstructs the exact original casing because every phrase
+          in the generator's notes_pool (fact_entities.py) is plain sentence-case with no
+          internal capitals. This test pins the closed vocabulary so a future notes_pool
+          phrase with an internal capital (e.g. an acronym) fails loudly here instead of
+          silently landing with the wrong casing.
+        tests:
+          - accepted_values:
+              values:
+                - 'Ring the bell twice'
+                - 'Leave at the door'
+                - 'Call on arrival'
+                - 'No onions please'
+                - 'Extra spicy'
+                - 'Gate code 1234'
+              config:
+                where: "delivery_notes is not null"
+      - name: was_text_noise_defect
+        description: >
+          Flags rows where delivery_notes had the deliberate text-noise defect
+          (casing/whitespace mangling) detected and cleaned, for auditability.
+
+  - name: stg_order_items
+    description: One row per order line item, 1:1 with bronze order_items.
+    columns:
+      - name: order_item_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_id
+        description: Foreign key to orders.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: menu_item_id
+        description: Foreign key to menu_items.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_menu_items')
+              field: menu_item_id
+      - name: line_total
+        tests: [not_null]
+
+  - name: stg_match_attempts
+    description: One offer/response row per courier match attempt, 1:1 with bronze match_attempts.
+    columns:
+      - name: match_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_id
+        description: Foreign key to orders.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: rider_id
+        description: Foreign key to riders.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_riders')
+              field: rider_id
+      - name: response
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['ACCEPTED', 'DECLINED', 'TIMEOUT']
+
+  - name: stg_payments
+    description: One row per payable order (DELIVERED/CANCELLED), 1:1 with bronze payments.
+    columns:
+      - name: payment_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_id
+        description: Foreign key to orders.
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: amount
+        tests: [not_null]
+      - name: method
+        description: Payment method used for this transaction.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['upi', 'card', 'wallet', 'cod']
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['SUCCESS', 'FAILED']
+
+  - name: stg_refunds
+    description: >
+      One row per refund. refund_amount_raw's accounting-parens text defect is cleaned into
+      a proper positive decimal(18,2) - was_money_text_defect flags which rows needed it.
+    columns:
+      - name: refund_id
+        description: Primary key.
+        tests: [unique, not_null]
+      - name: order_id
+        description: Foreign key to orders.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: payment_id
+        description: Foreign key to payments.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_payments')
+              field: payment_id
+      - name: refund_amount
+        tests: [not_null]
+      - name: was_money_text_defect
+        description: >
+          Flags rows where refund_amount_raw had the deliberate money-as-text
+          (accounting-parens) defect detected and cleaned, for auditability.
+      - name: reason
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['CANCELLED', 'QUALITY_ISSUE', 'LATE_DELIVERY', 'MISSING_ITEMS']

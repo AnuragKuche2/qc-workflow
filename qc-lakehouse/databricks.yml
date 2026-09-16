@@ -1,0 +1,183 @@
+bundle:
+  name: qc_lakehouse
+
+artifacts:
+  qc_lakehouse_wheel:
+    type: whl
+    build: uv build --wheel
+    path: .
+
+variables:
+  warehouse_id:
+    description: >-
+      SQL warehouse ID used by the dbt_run/dbt_test jobs. Databricks UI: SQL Warehouses ->
+      your warehouse -> Connection details -> HTTP Path (the ID is the trailing path segment).
+      Override via `databricks bundle deploy --var="warehouse_id=..."` for a different workspace.
+    default: ca865a4ef1668613
+
+resources:
+  jobs:
+    generate_reference_data:
+      name: generate_reference_data
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./scripts/generate_reference_data.py
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    generate_fact_data:
+      name: generate_fact_data
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./scripts/generate_fact_data.py
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    dbt_run:
+      name: dbt_run
+      tasks:
+        # dbt_task has no field to reference a Databricks secret directly, and
+        # {{secrets/scope/key}} is not resolved inside dbt_task commands (confirmed live - see
+        # scripts/resolve_pii_salt.py's docstring and the task-4 report). This task bridges
+        # dbutils.secrets.get -> a task value the dbt_task below can reference via --vars.
+        # CAVEAT: the resolved value is NOT protected end-to-end - the dbt_task below echoes
+        # its own resolved shell command (including the substituted value) into its run
+        # output/logs in plaintext, visible to anyone with read/API access to that job run.
+        # Known, accepted limitation for this single-user Free Edition workspace - see
+        # scripts/resolve_pii_salt.py and the task-4 report for details.
+        - task_key: resolve_secrets
+          spark_python_task:
+            python_file: ./scripts/resolve_pii_salt.py
+          environment_key: qc_lakehouse_secrets_env
+        - task_key: main
+          depends_on:
+            - task_key: resolve_secrets
+          dbt_task:
+            project_directory: ./dbt/qc_lakehouse
+            commands:
+              - "dbt run --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
+            warehouse_id: ${var.warehouse_id}
+            catalog: qc_dev
+            schema: silver
+          environment_key: qc_lakehouse_dbt_env
+      environments:
+        - environment_key: qc_lakehouse_secrets_env
+          spec:
+            environment_version: "3"
+        - environment_key: qc_lakehouse_dbt_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - dbt-databricks>=1.12.5
+
+    dbt_test:
+      name: dbt_test
+      tasks:
+        # Same bridging task as dbt_run's - duplicated rather than shared because task values
+        # only propagate within one job run's own task DAG, and dbt_run/dbt_test are separate
+        # top-level jobs (Task 5's Airflow DAG triggers them independently).
+        # CAVEAT: the resolved value is NOT protected end-to-end - the dbt_task below echoes
+        # its own resolved shell command (including the substituted value) into its run
+        # output/logs in plaintext, visible to anyone with read/API access to that job run.
+        # Known, accepted limitation for this single-user Free Edition workspace - see
+        # scripts/resolve_pii_salt.py and the task-4 report for details.
+        - task_key: resolve_secrets
+          spark_python_task:
+            python_file: ./scripts/resolve_pii_salt.py
+          environment_key: qc_lakehouse_secrets_env
+        - task_key: main
+          depends_on:
+            - task_key: resolve_secrets
+          dbt_task:
+            project_directory: ./dbt/qc_lakehouse
+            commands:
+              - "dbt test --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
+            warehouse_id: ${var.warehouse_id}
+            catalog: qc_dev
+            schema: silver
+          environment_key: qc_lakehouse_dbt_env
+      environments:
+        - environment_key: qc_lakehouse_secrets_env
+          spec:
+            environment_version: "3"
+        - environment_key: qc_lakehouse_dbt_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - dbt-databricks>=1.12.5
+
+    # NOTE: adapted from the brief's draft. The brief guessed a job-level `parameters:`
+    # block (JobParameterDefinition - name/default) would be passed as CLI args to the
+    # spark_python_task automatically. `make bundle-validate` accepted that shape (it's
+    # valid schema), but the first live smoke run of optimize_fct_orders proved it doesn't
+    # do what was assumed: job-level parameters are named substitution variables
+    # (referenced elsewhere via `{{job.parameters.<name>}}`), not auto-appended argv - the
+    # task failed with `--operation` missing entirely. Checked `databricks bundle schema`
+    # (jobs.SparkPythonTask): the actual CLI-args field is `spark_python_task.parameters`,
+    # a plain list of strings passed directly to the Python file. Fixed here; run_maintenance.py
+    # itself needed no change since it already just scans sys.argv for `--operation`.
+    optimize_fct_orders:
+      name: optimize_fct_orders
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/run_maintenance.py
+            parameters: ["--operation", "optimize"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    analyze_fct_orders:
+      name: analyze_fct_orders
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/run_maintenance.py
+            parameters: ["--operation", "analyze"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    vacuum_fct_orders:
+      name: vacuum_fct_orders
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/run_maintenance.py
+            parameters: ["--operation", "vacuum"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+targets:
+  dev:
+    default: true
