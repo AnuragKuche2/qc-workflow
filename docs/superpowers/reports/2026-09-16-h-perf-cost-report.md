@@ -15,3 +15,13 @@ Benchmark scale: 73,723,047 rows (~51.7x baseline; the 500x target was not reach
 ## Recommendation
 
 **orders_bench_liquid** scanned the fewest total bytes across the benchmark query set (420,340,485 bytes), making it the recommended layout for the real `fct_orders` table.
+
+**Note on duration:** `orders_bench_partitioned` had the lowest total wall-clock duration (6899ms) among the layouts compared, faster than the recommended `orders_bench_liquid` (7523ms). Duration is not used as the decision signal here: each query ran once (no repeated sampling) on a shared, contended 2X-Small warehouse, so wall-clock time is subject to queuing/contention noise. Bytes-scanned is deterministic given the query and physical layout, which is why it - not duration - drives the recommendation above.
+
+## Cost
+
+Aggregate SQL warehouse usage for the benchmark's run window (2026-09-16T13:00:00+00:00 to 2026-09-16T15:00:00+00:00, UTC): **7.7676 DBU** (~$5.44 at $0.70/DBU, `PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST_OHIO`).
+
+This is a warehouse-hour aggregate, not a per-layout or per-query cost: `system.billing.usage` buckets consumption by warehouse and hour, with no per-statement or per-query cost column, so this total cannot be split across the 4 layouts compared above - it covers everything the warehouse did in that window (the benchmark queries, the `system.query.history` backfill polling, and this report's own generation queries), not any single layout's cost alone.
+
+Bytes-scanned, not this billing total, is the per-layout decision signal used above: it is captured per query via `system.query.history` (see `run_benchmark_queries.py`), and DBU consumption for serverless SQL scales with compute-time/bytes-processed, so a lower-bytes-scanned layout is the one that would cost less at scale, even though this billing table's granularity can't prove that arithmetically at the level available here.
