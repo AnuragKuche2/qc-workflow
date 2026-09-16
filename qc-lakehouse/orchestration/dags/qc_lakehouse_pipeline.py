@@ -29,6 +29,18 @@ DEFAULT_ARGS = {
 # allows, covering the pipeline's full sequential run instead of each job individually.
 PIPELINE_DEADLINE = timedelta(minutes=65)
 
+# DeadlineReference.DAGRUN_QUEUED_AT, not DAGRUN_LOGICAL_DATE: a manually-triggered DAG run
+# (this DAG's only trigger path - `schedule=None` below) has no `--logical-date` passed, so
+# Airflow 3.3.1 leaves `logical_date` NULL on that run. The deadline evaluator silently skips
+# creating a Deadline row whenever its reference resolves to a null timestamp - no error, no
+# log line beyond a buried "Could not find DagRun" warning, the trigger still exits 0, and the
+# callback then can never fire. `queued_at` is always populated regardless of trigger type
+# (this is Airflow's own documented example for exactly this "manual trigger" case), so it's
+# the correct reference here. Confirmed against this project's real Airflow 3.3.1 instance with
+# a throwaway probe DAG carrying the identical deadline block: DAGRUN_LOGICAL_DATE created 0
+# Deadline rows on trigger (reproducing this DAG's own 6-run live history, which also created
+# zero); DAGRUN_QUEUED_AT created exactly 1, with deadline_time == queued_at + interval.
+
 
 def log_deadline_missed(**kwargs):
     """Deadline-miss callback. A real system would page/alert here (PagerDuty, Slack, etc.) -
@@ -47,7 +59,7 @@ with DAG(
     schedule=None,
     catchup=False,
     deadline=DeadlineAlert(
-        reference=DeadlineReference.DAGRUN_LOGICAL_DATE,
+        reference=DeadlineReference.DAGRUN_QUEUED_AT,
         interval=PIPELINE_DEADLINE,
         callback=SyncCallback(log_deadline_missed),
     ),

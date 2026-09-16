@@ -75,3 +75,21 @@ def test_dag_has_deadline_alert_configured():
     dag = dagbag.get_dag("qc_lakehouse_pipeline")
     assert dag.deadline is not None
     assert len(dag.deadline) == 1
+
+
+def test_deadline_alert_uses_queued_at_not_logical_date():
+    # Regression test for a real bug live-verified against this project's own Airflow 3.3.1
+    # instance: DeadlineReference.DAGRUN_LOGICAL_DATE never creates a Deadline row for a
+    # manually-triggered run (this DAG's only trigger path - it has no schedule), because a
+    # manual trigger leaves `logical_date` NULL and the deadline evaluator silently skips a
+    # null-resolving reference - the callback then can never fire, with no error surfaced
+    # anywhere but a buried "Could not find DagRun" warning. DAGRUN_QUEUED_AT is always
+    # populated regardless of trigger type, so it's the only reference that actually works
+    # here. `test_dag_has_deadline_alert_configured` above gave a false green on the broken
+    # DAGRUN_LOGICAL_DATE version (a DeadlineAlert object existed - it just could never fire),
+    # so this test pins the reference type itself, not just its presence.
+    from airflow.sdk.definitions.deadline import DagRunQueuedAtDeadline
+
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_pipeline")
+    assert isinstance(dag.deadline[0].reference, DagRunQueuedAtDeadline)
