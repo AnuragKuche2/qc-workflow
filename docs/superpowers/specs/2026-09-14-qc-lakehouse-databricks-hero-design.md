@@ -1,6 +1,6 @@
 # QC Lakehouse (Databricks-Hero) - Design
 
-**Status:** Sub-project A built and merged. **B1** (spine, section 6) and **W1a** (money-chain fact tables, section 6.6) built and merged. **C** (dbt medallion, section 8) built and merged. **E1** (Airflow triggering B1+C via Databricks Jobs, section 9) is designed, pending implementation. **B2**/W1b (order_events/courier_shifts/gps_pings + Auto Loader, **streaming**) and **E2** (Airflow triggering/monitoring B2 once it exists, **streaming**) are deferred - not yet designed. D, G, H, F are decomposed below but not yet individually designed. Build order is fixed: A -> B -> C -> E -> H -> D -> G -> F (see section 4).
+**Status:** Sub-project A built and merged. **B1** (spine, section 6) and **W1a** (money-chain fact tables, section 6.6) built and merged. **C** (dbt medallion, section 8) built and merged. **E1** (Airflow triggering B1+C via Databricks Jobs, section 9) built and merged. **H** (performance/maintenance/cost lab, section 10) is designed, pending implementation. **B2**/W1b (order_events/courier_shifts/gps_pings + Auto Loader, **streaming**) and **E2** (Airflow triggering/monitoring B2 once it exists, **streaming**) are deferred - not yet designed. D, G, F are decomposed below but not yet individually designed. Build order is fixed: A -> B -> C -> E -> H -> D -> G -> F (see section 4).
 
 ## 1. Background
 
@@ -660,7 +660,137 @@ DAG that has no concurrency needs.
   API run status, then trigger it a second time to confirm the idempotent-rerun story holds
   through Airflow too (not just when the scripts are run directly, as W1a already proved).
 
-## 10. Open questions for later sub-projects (not blocking A or B)
+## 10. Sub-project H: Performance, maintenance & cost optimization lab - detailed design
+
+**H2/streaming note:** this sub-project has no streaming component - not applicable to the
+B1/B2/E1/E2 labeling convention introduced in section 9.
+
+**Confirmed live before design, not assumed:** `system.billing.usage` and `system.query.history`
+are both queryable and populated on this Free Edition workspace (2,450 real billing rows
+spanning 2026-02-02 to 2026-09-15; 2,392 query-history rows in the last day alone, confirmed via
+the SQL Statement Execution API against the live workspace). This resolves the open question
+from section 4's H scope note and section 11's list below - no fallback cost-measurement
+mechanism is needed.
+
+**Free Edition platform ceiling, confirmed live via web search against current Databricks
+docs (2026-09):** exactly one SQL warehouse is available, capped at `2X-Small` (the smallest
+size - cannot be scaled up), and exceeding the account's usage allowance "shut[s] down and
+[makes compute] unavailable for the rest of the day (and in extreme cases, the rest of the
+month)." This is a hard ceiling, not a tunable constraint - it directly shaped the scale and
+checkpointing decisions below.
+
+### Scope boundary with Sub-project D
+
+While brainstorming this sub-project, the user raised wanting synthetic review/comment data
+(ratings, review text, sentiment analysis, RAG) - inspired by an external tutorial
+(`yt_transcript_01.md`/`yt_transcript_02.md` at the repo root, a "Zomato AI Data Analytics"
+walkthrough covering exactly this). This maps to **Sub-project D** (AI review-issue layer),
+not H - and matches the gap section 11 already flagged: no review data exists anywhere in the
+pipeline yet. **Decision: H stays scoped to performance/cost only.** Synthetic review
+generation is deferred to D's own brainstorm/design cycle when its turn comes in the build
+order, not designed ahead of schedule here. Noted here so D's future design doesn't start from
+zero context on what the user has in mind for it.
+
+### Architecture
+
+- **Isolated benchmark schema** (`qc_dev.perf_bench`) - completely separate from the real
+  `bronze_source`/`silver`/`gold` schemas used by B/C/E1. Nothing about the real pipeline is at
+  risk from the benchmark, and cleanup is dropping the schema once done.
+- **Benchmark table: `orders` only**, not the full money-chain (order_items, match_attempts,
+  payments, refunds stay at normal pipeline scale) - wider/more realistic query predicates
+  (status, zone, date range) than `order_items` would offer, and generating one table at scale
+  is far cheaper than five.
+- **Target scale: 500x current order volume** (~675M orders, reusing the existing Spark-native
+  generator's logic, not a purpose-built dummy dataset - realism was an explicit user
+  preference). Given the 2X-Small-only warehouse and the "rest of the month" lockout risk,
+  scale is a target, not a guarantee - see checkpointing below.
+- **Four physical layout copies** of the same generated data: baseline (no clustering),
+  partition-by-date, `ZORDER BY` on a high-cardinality predicate column (zone_id or
+  restaurant_id - confirm which during implementation based on the benchmark queries' actual
+  predicates), and Delta Liquid Clustering.
+- **A benchmark query set** (date-range filter, zone filter, status filter, a join-heavy
+  aggregate - the predicates a real dashboard would use) run against all 4 layouts, capturing
+  query time and bytes-scanned via `system.query.history`.
+- **A written cost report** joining benchmark results against `system.billing.usage` (generation
+  + `OPTIMIZE` costs) and `system.query.history` (per-query bytes-scanned), with a concrete
+  recommendation - not just raw numbers.
+- **The recommended layout gets applied to the real `fct_orders` table** (Sub-project C), and
+  `OPTIMIZE`/`ANALYZE`/`VACUUM` become real Airflow tasks in a **new, separate DAG**
+  (`qc_lakehouse_maintenance`) rather than added to E1's existing `qc_lakehouse_pipeline` -
+  E1's own scope boundary is explicitly ingestion+dbt triggers only, and maintenance is a
+  different concern with a different natural cadence (E1's DAG runs the whole pipeline
+  end-to-end per trigger; maintenance targets one table on its own schedule) - closing the loop
+  from benchmark to production, not just a report nobody acts on.
+
+### Components
+
+- `qc-lakehouse/perf_lab/generate_benchmark_orders.py` - reuses the existing `fact_entities.py`
+  generation logic at scaled config, writing to `qc_dev.perf_bench.orders_bench` in
+  checkpointed batches (one batch per N synthetic days, not one giant write).
+- `qc-lakehouse/perf_lab/apply_layouts.py` - produces the 3 comparison copies
+  (`orders_bench_partitioned`, `orders_bench_zorder`, `orders_bench_liquid`) from the baseline
+  via `CREATE TABLE ... AS SELECT` plus the relevant `ALTER TABLE`/`OPTIMIZE` calls - each
+  layout is a genuinely separate physical table, no destructive re-optimization of a shared
+  table between comparisons.
+- `qc-lakehouse/perf_lab/run_benchmark_queries.py` - runs the fixed query set against all 4
+  tables, writing results to `qc_dev.perf_bench.benchmark_results`.
+- `qc-lakehouse/perf_lab/cost_report.py` - joins results against the two system tables, produces
+  the written report (`docs/superpowers/reports/YYYY-MM-DD-h-perf-cost-report.md`).
+- A new `qc_lakehouse_maintenance` Airflow DAG (separate from E1's `qc_lakehouse_pipeline`) with
+  3 tasks (`optimize_fct_orders`/`analyze_fct_orders`/`vacuum_fct_orders`), each a new
+  Databricks Job added to the existing `databricks.yml` bundle, applying the winning layout and
+  running `OPTIMIZE`/`ANALYZE`/`VACUUM` against the real `fct_orders` table.
+
+### Data flow
+
+1. `generate_benchmark_orders.py` writes checkpointed batches to `qc_dev.perf_bench.orders_bench`.
+2. `apply_layouts.py` reads that baseline, produces the 3 comparison copies.
+3. `run_benchmark_queries.py` runs the fixed queries against all 4, writes timing/bytes-scanned
+   to `qc_dev.perf_bench.benchmark_results`.
+4. `cost_report.py` joins results against `system.billing.usage`/`system.query.history`,
+   produces the written report with a recommendation.
+5. The winning layout is applied to the real `fct_orders` table.
+6. New scheduled-but-manually-triggered Airflow tasks run `OPTIMIZE`/`ANALYZE`/`VACUUM` against
+   `fct_orders` going forward - **manual-trigger only for this portfolio project, same as E1's
+   DAG; automatic scheduling is explicitly deferred as a future upgrade, not part of this
+   sub-project's scope.**
+
+### Error handling
+
+- **Generation bailout, not all-or-nothing**: each checkpoint batch logs elapsed time and
+  throughput; if a batch takes meaningfully longer than the running average (target: >1.5-2x),
+  generation stops there rather than continuing toward 500x blindly. The benchmark still runs
+  at whatever scale was safely reached - a checkpoint bailout is not a failure, it's the
+  mechanism working as designed. This directly addresses the "try 500x, fall back if it fails"
+  risk discussed during brainstorming: unlike a rate-limited API call, Databricks' quota
+  enforcement is not a cheap, catchable rejection - by the time a hard failure is visible, the
+  damage (a day/month-long lockout) may already be done. The checkpoint threshold is a proxy
+  for "getting close to trouble" that lets the run stop itself before that point, not a retry
+  loop that reacts after the fact.
+- **Sequential execution only** - with exactly one 2X-Small warehouse, benchmark queries and
+  `OPTIMIZE` runs execute one at a time, never concurrently, to avoid unpredictable contention
+  on the only compute available.
+- **No VACUUM on the throwaway benchmark tables** - nothing meaningful to demonstrate by
+  vacuuming a table about to be dropped; VACUUM's real demonstration is the recurring
+  maintenance schedule against the real `fct_orders` table, respecting the project-wide
+  constraint (section 3) of never going below Delta's 7-day default retention without a stated
+  reason.
+- **Benchmark schema cleanup**: `qc_dev.perf_bench` is dropped once the report is generated and
+  the winning layout has been applied to production - nothing benchmark-related lingers as
+  ongoing cost.
+
+### Testing
+
+- Generation/checkpoint logic (config scaling, bailout threshold) unit-tested locally with a
+  tiny config, same pattern as the existing generator tests (`test_fact_entities.py` etc.).
+- `cost_report.py`'s join/report-generation logic unit-tested against sample
+  `billing.usage`/`query.history`-shaped data, not live queries.
+- Live validation: run the benchmark at whatever scale is actually reached (500x target, lower
+  if checkpointing bails early), confirm the report generates with real numbers, confirm the
+  new maintenance tasks trigger successfully via Airflow, confirm the winning layout is
+  genuinely applied to `fct_orders` (not just recommended in the report).
+
+## 11. Open questions for later sub-projects (not blocking A or B)
 
 - ~~Exact `databricks-connect` version pin depends on the Free Edition workspace's current
   serverless runtime version at implementation time - confirm during A rather than pinning
@@ -674,10 +804,16 @@ DAG that has no concurrency needs.
 - How Sub-project G's agent gets schema context (static schema dump vs. live `information_schema`
   lookups vs. a fixed set of vetted query templates it fills in) and how generated SQL is
   validated/sandboxed before execution against real gold marts - defer to G's design.
-- Whether Databricks Free Edition exposes `system.billing.usage` / `system.query.history` (or
-  equivalents) for real cost measurement in Sub-project H, or whether a fallback (bytes-scanned
-  from query metrics, DBU-seconds estimated from job run duration) is needed - confirm during
-  H's design, since Free Edition's system-table access may differ from a paid workspace.
+- ~~Whether Databricks Free Edition exposes `system.billing.usage` / `system.query.history`
+  (or equivalents) for real cost measurement in Sub-project H~~ **Resolved during H's
+  brainstorming:** both are queryable and populated (confirmed live via the SQL Statement
+  Execution API) - no fallback needed. See section 10.
+- **Found during H's brainstorming:** Free Edition's SQL warehouse is capped at `2X-Small`
+  (one warehouse, smallest size, not scalable) and exceeding the account's usage allowance can
+  shut down compute for the rest of the day or month - confirmed live via current Databricks
+  docs, not assumed. This is a hard platform ceiling for any future sub-project doing
+  large-scale live work (H itself, and potentially D depending on embedding-generation volume)
+  - budget checkpointed, bail-out-capable work rather than long uninterruptible runs.
 - **Found during C's brainstorming:** no review/comment/user-generated-text data exists
   anywhere in the pipeline. `orders.delivery_notes` is NOT a substitute - it's a fixed pool of
   6 canned delivery instructions set by the customer at order time, not organic post-delivery
