@@ -1,10 +1,10 @@
 # QC Lakehouse
 
-Foundation & Environment for the QC Lakehouse project - a quick-commerce delivery data
-pipeline with Databricks and dbt as co-hero technologies. This README covers Sub-project A
-only: getting the toolchain running. See
+A quick-commerce delivery data pipeline with Databricks and dbt as co-hero technologies. This
+README covers Sub-projects A (toolchain setup), B/W1a (reference and fact data generation), C
+(dbt medallion transformation), and E1 (Airflow orchestration). See
 `docs/superpowers/specs/2026-09-14-qc-lakehouse-databricks-hero-design.md` for the full
-architecture and later sub-projects (B onward).
+architecture and the sub-projects not yet built here.
 
 ## Prerequisites
 
@@ -105,9 +105,11 @@ make smoke-all
 
 ## What's not here yet
 
-The AI/RAG layer (Sub-projects F-H) is not yet built - see the design spec. Streaming
-ingestion and its Airflow trigger (Sub-project B2/W1b, E2) aren't built either - see the
-"Not yet built" note in "Airflow DAG orchestration" below for details.
+Sub-projects D (AI review-issue layer) and F-H (Polish, text-to-SQL agent, performance/cost
+lab) are not yet built - see the design spec (H is next in the chosen build order
+A -> B -> C -> E -> H -> D -> G -> F). Streaming ingestion and its Airflow trigger
+(Sub-project B2/W1b, E2) aren't built either - see the "Not yet built" note in "Airflow DAG
+orchestration" below for details.
 
 ## Reference data generator (Sub-project B spine)
 
@@ -195,15 +197,45 @@ Dockerized Airflow triggers 4 Databricks Jobs - `generate_reference_data`, `gene
 single sequential DAG (`orchestration/dags/qc_lakehouse_pipeline.py`). Compute always happens on
 Databricks; Airflow only triggers and polls.
 
+`databricks.yml` deploys `dbt_run` and `dbt_test` as Databricks Jobs (dbt's native `dbt_task`
+type, serverless, against the same `qc_dev` catalog as `make dbt-run`/`make dbt-test` above -
+`dbt_task` generates its own profile from `warehouse_id`/`catalog`/`schema` rather than passing
+`--target qc_dev`, so the two reach the same place by different mechanisms, not literally the
+same dbt target) - triggerable standalone via `databricks bundle run dbt_run -t dev` /
+`dbt_test -t dev`, and end-to-end live-verified as the last two steps of the
+`qc_lakehouse_pipeline` DAG.
+
+Because the `dbt_task` type has no field to reference a Databricks secret directly, and
+`{{secrets/scope/key}}` isn't resolved inside its `commands`, each of those two jobs runs a
+small `resolve_secrets` task first (`scripts/resolve_pii_salt.py`) that reads the
+`pii_hash_salt` secret from the `qc_lakehouse` Databricks secret scope and republishes it as a
+task value, which the dbt task then passes through via `--vars`. This is the same
+`pii_hash_salt` explained in the root `.env.example` (salts `stg_customers`' `email_hash` -
+changing it rewrites every existing hash) - the Databricks Secret and the local `PII_HASH_SALT`
+env var should hold the same value, so hashes computed locally and on a Databricks Job match.
+
+**Known limitation, not a fully-protected secret**: the dbt task echoes its own resolved shell
+command - including the substituted salt value - into that task's run output/logs in
+plaintext. Anyone with read/API access to a `dbt_run`/`dbt_test` job run can see the raw value
+there. This is accepted as reasonable for this project's single-user Free Edition workspace,
+but is a real exposure surface, not a secret-management best practice - re-examine before
+reusing this pattern anywhere with more than one reader of job run history.
+
 Setup:
 
 ```bash
 make install-airflow        # isolated .venv-airflow, for local DAG validation only
+databricks secrets create-scope qc_lakehouse
+databricks secrets put-secret qc_lakehouse pii_hash_salt   # same value as .env's PII_HASH_SALT
 make bundle-validate        # validates databricks.yml
 make bundle-deploy          # deploys the 4 jobs to the qc_dev workspace, serverless compute
 cd orchestration && cp .env.example .env   # fill in DATABRICKS_HOST
 docker compose up -d        # brings up Airflow at localhost:8080
 ```
+
+The secret scope must exist before `resolve_secrets` runs - without it, `dbt_run`/`dbt_test`
+fail two tasks into the DAG (after both generation jobs already succeeded) with an opaque
+`dbutils.secrets.get` error, rather than failing fast at setup time.
 
 Then configure the `databricks_default` Airflow connection (Admin -> Connections in the UI, or
 `airflow connections add`: connection type `Databricks`, host your workspace URL, and a
@@ -218,7 +250,10 @@ The DAG is manually-triggered only (no cron schedule) - the generator is determi
 recurring schedule would just regenerate identical data. Each task has 2 retries with a
 2-minute delay, and the DAG has a logged deadline-miss warning (Airflow 3's replacement for the
 removed SLA feature - no live alerting channel exists for this portfolio project, so the
-callback logs what a production system would page on).
+callback logs what a production system would page on). The deadline uses
+`DeadlineReference.DAGRUN_QUEUED_AT`, not `DAGRUN_LOGICAL_DATE` - a manually-triggered run has
+no logical date, and a deadline reference that resolves against a null timestamp silently never
+fires (see the code comment in `qc_lakehouse_pipeline.py` for the live-verified detail).
 
 `databricks.yml`'s `dev` target intentionally does not use bundle `mode: development` - that
 mode prefixes every deployed job's display name with `[dev <username>]`, which breaks the DAG's
@@ -229,24 +264,3 @@ attempts) before the task and its downstream dependents correctly fail.
 
 Not yet built: B2/W1b (streaming ingestion) and E2 (this DAG's future extension to trigger that
 streaming job) - see the design spec's section 9/10 open items.
-
-## dbt jobs on Databricks (Sub-project E1)
-
-`databricks.yml` deploys `dbt_run` and `dbt_test` as Databricks Jobs (dbt's native `dbt_task`
-type, serverless, against the same `qc_dev` target as `make dbt-run`/`make dbt-test` above) -
-triggerable via `databricks bundle run dbt_run -t dev` / `dbt_test -t dev`, and end-to-end
-live-verified as the last two steps of the `qc_lakehouse_pipeline` Airflow DAG - see "Airflow
-DAG orchestration" above.
-
-Because the `dbt_task` type has no field to reference a Databricks secret directly, and
-`{{secrets/scope/key}}` isn't resolved inside its `commands`, each job runs a small
-`resolve_secrets` task first (`scripts/resolve_pii_salt.py`) that reads the `pii_hash_salt`
-secret from the `qc_lakehouse` Databricks secret scope and republishes it as a task value,
-which the dbt task then passes through via `--vars`.
-
-**Known limitation, not a fully-protected secret**: the dbt task echoes its own resolved shell
-command - including the substituted salt value - into that task's run output/logs in
-plaintext. Anyone with read/API access to a `dbt_run`/`dbt_test` job run can see the raw value
-there. This is accepted as reasonable for this project's single-user Free Edition workspace,
-but is a real exposure surface, not a secret-management best practice - re-examine before
-reusing this pattern anywhere with more than one reader of job run history.

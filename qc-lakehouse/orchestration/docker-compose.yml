@@ -2,6 +2,10 @@ services:
   airflow:
     image: apache/airflow:3.3.1-python3.12
     environment:
+      # Airflow 3.3 removed SequentialExecutor entirely; this value is silently remapped to
+      # LocalExecutor at startup (only a FutureWarning in the container logs, no error). Kept
+      # here to document intent - still single-container, SQLite, no real concurrency - rather
+      # than switching to LocalExecutor explicitly and losing that signal.
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db

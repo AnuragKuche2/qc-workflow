@@ -67,10 +67,16 @@ smoke-dbt:
 # an unrelated project's pinned pyspark/dbt-databricks versions, so it never goes in the main
 # venv. Airflow itself runs in Docker (see orchestration/docker-compose.yml) - this venv
 # exists only so the DAG file can be structurally validated locally via pytest without
-# needing Docker running.
+# needing Docker running. Pinned to apache-airflow==3.3.1, matching orchestration/
+# docker-compose.yml's apache/airflow:3.3.1-python3.12 image tag exactly - same reasoning as
+# install-databricks's exact databricks-sdk/databricks-connect pins above: multiple code
+# comments, commit messages, and orchestration/tests/test_dag.py assert behavior specific to
+# apache-airflow==3.3.1 (e.g. DeadlineReference.DAGRUN_QUEUED_AT semantics), so local
+# validation must run against the exact same version the container runs, not whatever
+# resolves newest at install time.
 install-airflow:
 	uv venv .venv-airflow --python 3.12
-	uv pip install --python .venv-airflow/bin/python apache-airflow apache-airflow-providers-databricks
+	uv pip install --python .venv-airflow/bin/python "apache-airflow==3.3.1" apache-airflow-providers-databricks
 
 # Structural DAG validation only (DagBag import + task/dependency checks) - lives outside the
 # main `tests/` dir and the main `make check` because apache-airflow is not installed in the
@@ -93,11 +99,22 @@ generate-fact-data:
 	.venv-databricks/bin/python scripts/generate_fact_data.py
 
 # Real medallion work against qc_dev.silver/qc_dev.gold - never the smoke-test `dev` target.
+# Guards PII_HASH_SALT being *set but empty* before running: dbt_project.yml's
+# `{{ env_var('PII_HASH_SALT') }}` only fails loudly on an *unset* var - an empty string is
+# still "set", so `env_var` returns "" silently, --vars passes "" straight through, and
+# stg_customers.sql's own fail-fast default gets overridden with an empty salt, producing a
+# fully green run with unsalted PII hashes. This is the same failure mode
+# scripts/resolve_pii_salt.py's own empty-value guard exists to prevent on the Databricks-Job
+# side - this check is the equivalent guard for the local `make dbt-run`/`make dbt-test` path.
 dbt-run:
-	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt run --project-dir dbt/qc_lakehouse --target qc_dev
+	set -a && . ./.env && set +a && \
+	[ -n "$$PII_HASH_SALT" ] || { echo "PII_HASH_SALT is set but empty in .env - refusing to run: this would silently produce unsalted PII hashes in stg_customers." >&2; exit 1; } && \
+	DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt run --project-dir dbt/qc_lakehouse --target qc_dev
 
 dbt-test:
-	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt test --project-dir dbt/qc_lakehouse --target qc_dev
+	set -a && . ./.env && set +a && \
+	[ -n "$$PII_HASH_SALT" ] || { echo "PII_HASH_SALT is set but empty in .env - refusing to run: this would silently test against unsalted PII hashes in stg_customers." >&2; exit 1; } && \
+	DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt test --project-dir dbt/qc_lakehouse --target qc_dev
 
 dbt-docs:
 	set -a && . ./.env && set +a && DBT_PROFILES_DIR=dbt/qc_lakehouse uv run dbt docs generate --project-dir dbt/qc_lakehouse --target qc_dev
