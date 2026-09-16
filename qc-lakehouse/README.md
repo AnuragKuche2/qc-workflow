@@ -2,7 +2,8 @@
 
 A quick-commerce delivery data pipeline with Databricks and dbt as co-hero technologies. This
 README covers Sub-projects A (toolchain setup), B/W1a (reference and fact data generation), C
-(dbt medallion transformation), and E1 (Airflow orchestration). See
+(dbt medallion transformation), E1 (Airflow orchestration), and H (performance, maintenance &
+cost lab). See
 `docs/superpowers/specs/2026-09-14-qc-lakehouse-databricks-hero-design.md` for the full
 architecture and the sub-projects not yet built here.
 
@@ -264,3 +265,34 @@ attempts) before the task and its downstream dependents correctly fail.
 
 Not yet built: B2/W1b (streaming ingestion) and E2 (this DAG's future extension to trigger that
 streaming job) - see the design spec's section 9/10 open items.
+
+## Performance, maintenance & cost lab (Sub-project H)
+
+A deliberately large `orders` table was generated in an isolated `qc_dev.perf_bench` schema
+and compared across 4 physical layouts (no clustering, partition-by-date, `ZORDER BY zone_id`,
+Delta Liquid Clustering) - see
+`docs/superpowers/reports/2026-09-16-h-perf-cost-report.md` for the full comparison and
+reasoning. The generator targeted 500x the baseline order volume but a live Databricks Connect
+session error stopped it partway through, after 2 of 18 planned chunks had already landed
+durably: the accepted real scale is **73,723,047 rows (~51.7x baseline)**, judged sufficient
+for a meaningful layout comparison and not retried. **Delta Liquid Clustering on `zone_id`**
+won - lowest total bytes scanned (420,340,485) across the benchmark query set, ahead of ZORDER
+(421,585,617), partition-by-date (552,189,357), and no clustering (616,350,363) - and was
+applied to the real `fct_orders` table (`ALTER TABLE ... CLUSTER BY (zone_id)`, durably kept
+across future `dbt run`s via `liquid_clustered_by` in `fct_orders.sql`'s own dbt config, not
+just the one-time migration script).
+
+`OPTIMIZE`/`ANALYZE`/`VACUUM` for `fct_orders` are now real Databricks Jobs
+(`optimize_fct_orders`/`analyze_fct_orders`/`vacuum_fct_orders`), triggered via a new, separate
+`qc_lakehouse_maintenance` Airflow DAG (manual-trigger only, same as `qc_lakehouse_pipeline` -
+automatic scheduling is a deferred future upgrade, not built yet). Trigger it the same way as
+the main pipeline DAG: `docker compose exec airflow airflow dags trigger
+qc_lakehouse_maintenance`. Live-verified end to end through Airflow's own `job_name` lookup
+(not just `databricks bundle run`, which resolves job names differently - see E1's
+`mode: development` bug above for why this distinction matters): all 3 tasks succeeded in
+order, each against a real Databricks Jobs run ID confirmed both in the task's own Airflow log
+and independently via `databricks jobs get-run`.
+
+The benchmark's own `qc_dev.perf_bench` schema was dropped (`DROP SCHEMA ... CASCADE`) after
+the winning layout had already been applied to `fct_orders` - it was a one-time analysis, not
+an ongoing artifact, and `SHOW SCHEMAS IN qc_dev` no longer lists it.
