@@ -16,6 +16,10 @@ rounds, sleeping between them) resolves whichever statement_ids have landed so f
 are resolved or the round budget is exhausted - so the lag is paid once, in parallel across
 all 16, not once per query.
 
+qc_dev.perf_bench is intentionally dropped after Sub-project H's Task 6 cleanup - running this
+script again requires first re-running Tasks 1-2 (generate_benchmark_orders.py then
+apply_layouts.py) to recreate it.
+
 Each query gets a unique trailing SQL comment (`-- benchmark_run=<uuid>`) appended per
 invocation of this script. A live re-run against unchanged tables with byte-for-byte
 identical query text showed Databricks' SQL result cache serving cached results

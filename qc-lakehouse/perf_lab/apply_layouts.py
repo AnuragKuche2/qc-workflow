@@ -6,7 +6,10 @@ clustering strategy. All 4 get a plain OPTIMIZE (bin-packing compaction) - the b
 unoptimized output would trivially favor any clustering strategy and not show what clustering
 actually adds beyond compaction alone.
 
-Runs via serverless Spark, not the SQL warehouse - see Global Constraints on compute routing.
+Runs via serverless Spark, not the SQL warehouse - see
+docs/superpowers/plans/2026-09-16-qc-lakehouse-h-perf-cost-lab.md's Global Constraints on
+compute routing (this script's CREATE/OPTIMIZE calls against the small benchmark tables don't
+need system.query.history's bytes-scanned signal; only Task 3's comparison queries do).
 """
 from __future__ import annotations
 

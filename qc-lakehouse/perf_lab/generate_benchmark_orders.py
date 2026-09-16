@@ -8,10 +8,9 @@ doesn't give a cheap, catchable rejection - by the time a hard failure is visibl
 (a day/month-long compute lockout) may already be done, so this checkpoints BEFORE trouble
 rather than retrying AFTER it.
 
-Runs via serverless Spark (build_databricks_session), never the SQL warehouse - OPTIMIZE/
-ZORDER/Liquid Clustering (Task 2) and the benchmark queries (Task 3) are what actually need
-system.query.history, which only tracks warehouse-executed queries; this script's plain
-writes don't need that signal.
+Runs via serverless Spark (build_databricks_session), never the SQL warehouse - the
+benchmark queries (Task 3) are what actually need system.query.history, which only tracks
+warehouse-executed queries; this script's plain writes don't need that signal.
 
 ACCEPTED REALIZED SCALE (live run of 2026-09-15): the checkpoint fired early - not via the
 should_bail_out slow-chunk threshold, but via a hard Databricks Connect session error mid-run

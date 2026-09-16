@@ -1,7 +1,7 @@
 # Sub-project H: Layout & Cost Comparison Report
 
 Generated: 2026-09-16T14:21:28.810645+00:00
-Benchmark scale: 73,723,047 rows (target was 500x baseline; see Task 1's actual result)
+Benchmark scale: 73,723,047 rows (~51.7x baseline; the 500x target was not reached - see README)
 
 ## Results by layout (lower bytes-scanned = better query efficiency)
 

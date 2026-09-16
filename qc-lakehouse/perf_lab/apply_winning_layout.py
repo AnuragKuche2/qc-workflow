@@ -12,7 +12,19 @@ preserve clustering unless it's declared in the model's own dbt config - so dura
 in dbt/qc_lakehouse/models/marts/fct_orders.sql's `{{ config(liquid_clustered_by=[...]) }}`
 block, NOT in this script. This script is only the one-time migration that gets the table
 into that state *immediately*, without waiting for the next dbt run - it must apply the same
-strategy the dbt model now declares, or the two would disagree until the next rebuild."""
+strategy the dbt model now declares, or the two would disagree until the next rebuild.
+
+This script issues OPTIMIZE/ALTER TABLE via the SQL warehouse because it is a one-time,
+human-triggered migration run interactively; run_maintenance.py issues the same kind of
+statement via serverless Spark instead because it is the recurring path triggered by Airflow
+as a Databricks Job (spark_python_task), which runs on serverless Spark like the rest of this
+sub-project's scheduled jobs.
+
+qc_dev.perf_bench is intentionally dropped after Sub-project H's Task 6 cleanup - only the
+perf_bench schema read in _winning_layout() is gone, NOT qc_dev.gold.fct_orders (the
+production table this script writes to, which is untouched by that cleanup). Running this
+script again requires first re-running Tasks 1-2 (generate_benchmark_orders.py then
+apply_layouts.py) to recreate qc_dev.perf_bench."""
 from __future__ import annotations
 
 from databricks.sdk import WorkspaceClient
@@ -43,16 +55,33 @@ LAYOUT_SQL = {
 
 
 def _winning_layout(client: WorkspaceClient) -> str:
+    """Picks the layout with the lowest total bytes_scanned, considering only layouts where
+    every benchmark_results row has a non-null bytes_scanned. Databricks SQL sorts NULL first
+    under ASC, and sum() over an all-NULL group returns NULL too, so without the HAVING clause
+    below an unresolved layout could be selected and then have its strategy applied to the
+    real fct_orders table - the HAVING clause (count(*) = count(bytes_scanned), which counts
+    only non-null values) excludes any layout with a still-NULL row. This function only runs
+    against live Databricks and has no unit test coverage - see the module's other functions
+    for the same caveat."""
     result = client.statement_execution.execute_statement(
         warehouse_id=WAREHOUSE_ID,
         statement=(
             "SELECT layout, sum(bytes_scanned) as total_bytes "
             "FROM qc_dev.perf_bench.benchmark_results "
-            "GROUP BY layout ORDER BY total_bytes ASC LIMIT 1"
+            "GROUP BY layout "
+            "HAVING count(*) = count(bytes_scanned) "
+            "ORDER BY total_bytes ASC LIMIT 1"
         ),
         wait_timeout="30s",
     )
-    return result.result.data_array[0][0]
+    rows = result.result.data_array or []
+    if not rows:
+        raise RuntimeError(
+            "apply-winning-layout: every layout has at least one benchmark_results row with "
+            "bytes_scanned still NULL - refusing to pick a winner from incomplete data. "
+            "Re-run run_benchmark_queries.py's backfill before retrying this script."
+        )
+    return rows[0][0]
 
 
 def main() -> None:

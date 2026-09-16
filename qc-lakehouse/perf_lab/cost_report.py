@@ -1,7 +1,13 @@
 # qc-lakehouse/perf_lab/cost_report.py
-"""Joins Sub-project H's benchmark_results against real Databricks cost signals
-(system.billing.usage, system.query.history - both confirmed queryable and populated on this
-workspace) and produces a written recommendation, not just raw numbers."""
+"""Joins Sub-project H's benchmark_results (bytes-scanned and duration per query per layout,
+already captured from system.query.history by run_benchmark_queries.py) against
+orders_bench_baseline's row count, and produces a written recommendation for which physical
+layout to apply to production - not just raw numbers. Does not query system.billing.usage or
+system.query.history directly.
+
+qc_dev.perf_bench is intentionally dropped after Sub-project H's Task 6 cleanup - running this
+script again requires first re-running Tasks 1-2 (generate_benchmark_orders.py then
+apply_layouts.py) to recreate it."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -34,7 +40,13 @@ def summarize_by_layout(rows: list[dict]) -> dict[str, dict]:
 
 def render_report(summary: dict[str, dict], scale_note: str) -> str:
     ranked = sorted(summary.items(), key=lambda kv: kv[1]["total_bytes_scanned"])
-    winner, winner_stats = ranked[0]
+    eligible = [(name, stats) for name, stats in ranked if stats["missing_bytes_scanned_count"] == 0]
+    if not eligible:
+        raise ValueError(
+            "cost-report: every layout has at least one row with missing bytes_scanned - "
+            "cannot recommend a winner. Re-run run_benchmark_queries.py's backfill."
+        )
+    winner, winner_stats = eligible[0]
 
     lines = [
         "# Sub-project H: Layout & Cost Comparison Report",
@@ -94,7 +106,7 @@ def main() -> None:
         wait_timeout="30s",
     )
     actual_rows = int(scale_row_count.result.data_array[0][0])
-    scale_note = f"{actual_rows:,} rows (target was 500x baseline; see Task 1's actual result)"
+    scale_note = f"{actual_rows:,} rows (~51.7x baseline; the 500x target was not reached - see README)"
 
     report = render_report(summary, scale_note)
 
