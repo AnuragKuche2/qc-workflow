@@ -112,6 +112,64 @@ resources:
             dependencies:
               - dbt-databricks>=1.12.5
 
+    # NOTE: adapted from the brief's draft. The brief guessed a job-level `parameters:`
+    # block (JobParameterDefinition - name/default) would be passed as CLI args to the
+    # spark_python_task automatically. `make bundle-validate` accepted that shape (it's
+    # valid schema), but the first live smoke run of optimize_fct_orders proved it doesn't
+    # do what was assumed: job-level parameters are named substitution variables
+    # (referenced elsewhere via `{{job.parameters.<name>}}`), not auto-appended argv - the
+    # task failed with `--operation` missing entirely. Checked `databricks bundle schema`
+    # (jobs.SparkPythonTask): the actual CLI-args field is `spark_python_task.parameters`,
+    # a plain list of strings passed directly to the Python file. Fixed here; run_maintenance.py
+    # itself needed no change since it already just scans sys.argv for `--operation`.
+    optimize_fct_orders:
+      name: optimize_fct_orders
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/run_maintenance.py
+            parameters: ["--operation", "optimize"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    analyze_fct_orders:
+      name: analyze_fct_orders
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/run_maintenance.py
+            parameters: ["--operation", "analyze"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    vacuum_fct_orders:
+      name: vacuum_fct_orders
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/run_maintenance.py
+            parameters: ["--operation", "vacuum"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
 targets:
   dev:
     default: true

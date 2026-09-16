@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 DAGS_DIR = Path(__file__).resolve().parents[1] / "dags"
+BUNDLE_PATH = Path(__file__).resolve().parents[2] / "databricks.yml"
 
 
 def _dagbag():
@@ -55,9 +58,14 @@ def test_pipeline_dag_has_no_schedule():
     assert dag.timetable.can_be_scheduled is False
 
 
-def test_all_tasks_have_retries_configured():
+@pytest.mark.parametrize("dag_id", ["qc_lakehouse_pipeline", "qc_lakehouse_maintenance"])
+def test_all_tasks_have_retries_configured(dag_id):
+    # Parametrized over both DAGs (Minor finding from task-5 review): originally only checked
+    # qc_lakehouse_pipeline, silently leaving qc_lakehouse_maintenance's retry config
+    # unverified.
     dagbag = _dagbag()
-    dag = dagbag.get_dag("qc_lakehouse_pipeline")
+    dag = dagbag.get_dag(dag_id)
+    assert dag is not None
     for task_id in dag.task_ids:
         task = dag.get_task(task_id)
         assert task.retries == 2
@@ -93,3 +101,82 @@ def test_deadline_alert_uses_queued_at_not_logical_date():
     dagbag = _dagbag()
     dag = dagbag.get_dag("qc_lakehouse_pipeline")
     assert isinstance(dag.deadline[0].reference, DagRunQueuedAtDeadline)
+
+
+def test_maintenance_dag_imports_without_errors():
+    # NOTE: fixed per task-5 review (Minor finding) - this was previously an exact duplicate
+    # of test_dag_imports_without_errors above (just re-checking dagbag.import_errors == {}
+    # with no scoping to this DAG specifically). Scoped here to actually assert something
+    # maintenance-DAG-specific: that it was found and parsed into the bag at all.
+    dagbag = _dagbag()
+    assert dagbag.import_errors == {}
+    assert dagbag.get_dag("qc_lakehouse_maintenance") is not None
+
+
+def test_maintenance_dag_has_exactly_three_tasks():
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_maintenance")
+    assert dag is not None
+    assert set(dag.task_ids) == {"optimize_fct_orders", "analyze_fct_orders", "vacuum_fct_orders"}
+
+
+def test_maintenance_dag_dependency_chain_is_sequential():
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_maintenance")
+    optimize = dag.get_task("optimize_fct_orders")
+    analyze = dag.get_task("analyze_fct_orders")
+    vacuum = dag.get_task("vacuum_fct_orders")
+    assert optimize.downstream_task_ids == {"analyze_fct_orders"}
+    assert analyze.downstream_task_ids == {"vacuum_fct_orders"}
+    assert vacuum.downstream_task_ids == set()
+
+
+def test_maintenance_dag_has_no_schedule():
+    # NOTE: adapted from the brief's draft, same reasoning as test_pipeline_dag_has_no_schedule
+    # above - Airflow 3.3.1 removed `DAG.schedule_interval` and `Timetable.summary` (present in
+    # the 2.x-era draft) in favor of `DAG.schedule` and `Timetable.can_be_scheduled`.
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_maintenance")
+    assert dag.schedule is None
+    assert dag.timetable.can_be_scheduled is False
+
+
+def test_maintenance_dag_job_names_match_databricks_yml():
+    # Added per task-5 review (Important finding #3): the DAG's `job_name=` strings and
+    # databricks.yml's job `name:` keys are duplicated literals with no assertion tying them
+    # together - a rename in one file would only surface as an Airflow runtime failure
+    # (job-not-found), not a test failure. Parses databricks.yml directly (pyyaml is already
+    # a dev dependency) and cross-checks both the job_name values themselves and the mapping
+    # from DAG task_id -> job_name against the actual job resource keys/names declared there.
+    import yaml
+
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_maintenance")
+
+    with BUNDLE_PATH.open() as f:
+        bundle = yaml.safe_load(f)
+    jobs = bundle["resources"]["jobs"]
+
+    expected_job_names = {"optimize_fct_orders", "analyze_fct_orders", "vacuum_fct_orders"}
+    # Every expected job must exist in databricks.yml, as its own resource key, with a
+    # matching `name:` field (the DatabricksRunNowOperator resolves job_name against the
+    # job's `name:`, not the bundle resource key - they happen to be identical by convention
+    # in this file, but this test pins that convention rather than assuming it).
+    for job_name in expected_job_names:
+        assert job_name in jobs, f"{job_name} is missing from databricks.yml's resources.jobs"
+        assert jobs[job_name]["name"] == job_name, (
+            f"databricks.yml job resource {job_name!r} has name: {jobs[job_name]['name']!r}, "
+            f"expected {job_name!r}"
+        )
+
+    # Every DAG task's job_name must point at one of those same, real job names.
+    for task_id in dag.task_ids:
+        task = dag.get_task(task_id)
+        assert task.job_name in expected_job_names, (
+            f"DAG task {task_id!r} has job_name={task.job_name!r}, not one of the 3 "
+            f"maintenance jobs declared in databricks.yml ({expected_job_names})"
+        )
+        assert task.job_name in jobs, (
+            f"DAG task {task_id!r} references job_name={task.job_name!r}, which does not "
+            "exist as a resource key in databricks.yml"
+        )
