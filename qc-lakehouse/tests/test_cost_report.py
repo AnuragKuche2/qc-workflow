@@ -116,6 +116,23 @@ def test_render_cost_section_reports_aggregate_dbu_and_usd_with_the_warehouse_ho
     assert "system.query.history" in text
 
 
+def test_render_cost_section_flags_billing_lag_instead_of_a_bare_zero_dbu_when_no_rows_found():
+    cost = {
+        "window_start": datetime(2026, 9, 16, 13, 0, tzinfo=UTC),
+        "window_end": datetime(2026, 9, 16, 15, 0, tzinfo=UTC),
+        "total_dbu": 0.0,
+        "total_usd": 0.0,
+        "skus": [],
+    }
+    lines = render_cost_section(cost)
+    text = "\n".join(lines)
+    assert "## Cost" in text
+    assert "0.0000 DBU" not in text
+    assert "No `system.billing.usage` rows were found" in text
+    assert "ingestion lag" in text
+    assert "not that zero cost was incurred" in text
+
+
 def test_render_cost_section_omits_price_note_when_no_price_is_available():
     cost = dict(SAMPLE_COST)
     cost["total_usd"] = 0.0

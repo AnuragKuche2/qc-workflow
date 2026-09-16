@@ -17,8 +17,11 @@ script again requires first re-running Tasks 1-2 (generate_benchmark_orders.py t
 apply_layouts.py) to recreate it."""
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from databricks.sdk import WorkspaceClient
 
@@ -90,6 +93,26 @@ def render_cost_section(cost: dict) -> list[str]:
     total_dbu = cost["total_dbu"]
     total_usd = cost["total_usd"]
     skus = cost.get("skus", [])
+
+    if not skus:
+        # No system.billing.usage rows at all for this window - not the same thing as a
+        # genuine "this cost nothing" finding. This workspace has observed billing ingestion
+        # lag exceeding several hours, so an empty result most likely means the data for this
+        # window simply hasn't landed yet. Rendering a bare "0.0000 DBU" here would present
+        # that ambiguity as a clean result, so say so explicitly instead.
+        return [
+            "",
+            "## Cost",
+            "",
+            (
+                f"No `system.billing.usage` rows were found for the window "
+                f"({start.isoformat()} to {end.isoformat()}, UTC). This most likely means "
+                "billing data for this period has not yet landed - ingestion lag in this "
+                "workspace has been observed to exceed several hours - not that zero cost was "
+                "incurred. Re-run this report later, or widen `COST_LOOKBACK_HOURS`, to get a "
+                "real figure."
+            ),
+        ]
 
     if len(skus) == 1 and skus[0].get("unit_price_usd") is not None:
         price_note = (

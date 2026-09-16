@@ -27,6 +27,11 @@ script again requires first re-running Tasks 1-2 (generate_benchmark_orders.py t
 apply_layouts.py) to recreate qc_dev.perf_bench."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from databricks.sdk import WorkspaceClient
 
 from perf_lab._shared import WAREHOUSE_ID

@@ -20,7 +20,7 @@ Benchmark scale: 73,723,047 rows (~51.7x baseline; the 500x target was not reach
 
 ## Cost
 
-Aggregate SQL warehouse usage for the benchmark's run window (2026-09-16T13:00:00+00:00 to 2026-09-16T15:00:00+00:00, UTC): **7.7676 DBU** (~$5.44 at $0.70/DBU, `PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST_OHIO`).
+Aggregate SQL warehouse usage for the two-hour window covering this benchmark's original run and report generation (2026-09-16, 13:00-15:00 UTC - verified via a live `system.billing.usage` query after the fact, not literal output of a single script invocation at the `Generated:` timestamp above): **7.7676 DBU** (~$5.44 at $0.70/DBU, `PREMIUM_SERVERLESS_SQL_COMPUTE_US_EAST_OHIO`).
 
 This is a warehouse-hour aggregate, not a per-layout or per-query cost: `system.billing.usage` buckets consumption by warehouse and hour, with no per-statement or per-query cost column, so this total cannot be split across the 4 layouts compared above - it covers everything the warehouse did in that window (the benchmark queries, the `system.query.history` backfill polling, and this report's own generation queries), not any single layout's cost alone.
 
