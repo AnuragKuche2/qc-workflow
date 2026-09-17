@@ -10,32 +10,87 @@ sources:
     schema: bronze_source
     tables:
       - name: cities
+        columns:
+          - name: city_id
+            tests: [not_null, unique]
       - name: zones
+        columns:
+          - name: zone_id
+            tests: [not_null, unique]
       - name: restaurants
         description: >
           Source-visible restaurant attributes only. Does NOT include popularity_weight or
           price_index - those are generator-only internals (_gen_restaurant_profile), which
           this project must never source, matching the constraint that the OLTP source would
           never know a restaurant's true popularity.
+        columns:
+          - name: restaurant_id
+            tests: [not_null, unique]
       - name: riders
+        columns:
+          - name: rider_id
+            tests: [not_null, unique]
       - name: menu_items
+        columns:
+          - name: menu_item_id
+            tests: [not_null, unique]
       - name: rider_payout_tiers
+        description: >
+          SCD2-shaped (valid_from/valid_to), but every row is currently open-ended
+          (valid_to is NULL) with exactly one row per tier - see build_payout_tiers. tier is
+          the current natural key; if a future generator change introduces a rate change
+          (a second row per tier with a closed valid_to), this test must become a composite
+          uniqueness check on (tier, valid_from) instead.
+        columns:
+          - name: tier
+            tests: [not_null, unique]
       - name: demand_daily
+        columns:
+          - name: day_index
+            tests: [not_null, unique]
       - name: demand_hourly
+        description: >
+          One row per (day_index, hour) - see build_orders_shell, which joins on this exact
+          composite key to derive each order's contiguous order_id. No single column is
+          unique alone; composite uniqueness is enforced by
+          assert_demand_hourly_day_hour_is_unique.sql in tests/.
+        columns:
+          - name: day_index
+            tests: [not_null]
+          - name: hour
+            tests: [not_null]
       - name: customers
         description: >
           Contains raw PII (email, phone) - staging must mask both, they must never reach
           silver or gold unmasked.
+        columns:
+          - name: customer_id
+            tests: [not_null, unique]
       - name: orders
         description: >
           delivery_notes carries a deliberate text-noise defect (casing/whitespace mangling)
           on a fraction of non-null rows - staging must clean it.
+        columns:
+          - name: order_id
+            tests: [not_null, unique]
       - name: order_items
+        columns:
+          - name: order_item_id
+            tests: [not_null, unique]
       - name: match_attempts
+        columns:
+          - name: match_id
+            tests: [not_null, unique]
       - name: payments
+        columns:
+          - name: payment_id
+            tests: [not_null, unique]
       - name: refunds
         description: >
           refund_amount_raw is a STRING, not a decimal - a deliberate defect, sometimes
           accounting-parens formatted (e.g. "(20.47)"). Staging must parse it back into a
           proper decimal(18,2), always as a positive magnitude (parens are a formatting
           quirk, never a sign - the underlying refund amount is always positive).
+        columns:
+          - name: refund_id
+            tests: [not_null, unique]

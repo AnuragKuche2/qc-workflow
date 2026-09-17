@@ -5,141 +5,254 @@ models:
     description: >
       Customer dimension. email/phone are masked (see stg_customers); full_name/lat/lon pass
       through unmasked, matching stg_customers' own established PII scope.
+    config:
+      contract:
+        enforced: true
     columns:
       - name: customer_id
         description: Primary key.
+        data_type: bigint
         tests: [unique, not_null]
+      - name: customer_ref
+        data_type: string
+      - name: email_hash
+        description: Salted one-way SHA-256 hash of the customer's email - see stg_customers.
+        data_type: string
+      - name: phone_masked
+        data_type: string
+      - name: full_name
+        data_type: string
+      - name: city_id
+        data_type: bigint
+      - name: home_zone_id
+        data_type: bigint
+      - name: lat
+        data_type: double
+      - name: lon
+        data_type: double
+      - name: signup_ts
+        data_type: timestamp
 
   - name: dim_restaurant
     description: >
       Restaurant dimension. Deliberately excludes popularity/price-index internals - see
       stg_restaurants.
+    config:
+      contract:
+        enforced: true
     columns:
       - name: restaurant_id
         description: Primary key.
+        data_type: bigint
         tests: [unique, not_null]
+      - name: restaurant_ref
+        data_type: string
+      - name: name
+        data_type: string
+      - name: cuisine_type
+        data_type: string
+      - name: city_id
+        data_type: bigint
+      - name: zone_id
+        data_type: bigint
+      - name: commission_pct
+        data_type: decimal(5,4)
+      - name: prep_time_p50_minutes
+        data_type: int
+      - name: is_active
+        data_type: boolean
 
   - name: dim_rider
     description: Rider dimension.
+    config:
+      contract:
+        enforced: true
     columns:
       - name: rider_id
         description: Primary key.
+        data_type: bigint
         tests: [unique, not_null]
+      - name: rider_ref
+        data_type: string
+      - name: vehicle_type
+        data_type: string
+      - name: payout_tier
+        data_type: string
+      - name: home_zone_id
+        data_type: bigint
+      - name: is_active
+        data_type: boolean
 
   - name: dim_zone
     description: Zone dimension, with city attributes folded in directly.
+    config:
+      contract:
+        enforced: true
     columns:
       - name: zone_id
         description: Primary key.
+        data_type: bigint
         tests: [unique, not_null]
-      - name: city_id
-        tests: [not_null]
       - name: zone_name
         description: Human-readable name of the delivery zone.
+        data_type: string
       - name: center_lat
         description: Latitude of the zone's center point.
+        data_type: double
       - name: center_lon
         description: Longitude of the zone's center point.
+        data_type: double
       - name: ring
         description: Concentric ring index of this zone relative to its city center.
+        data_type: int
       - name: base_delivery_fee
         description: Delivery fee floor for this zone.
+        data_type: decimal(18,2)
       - name: sla_target_minutes
         description: Target delivery time in minutes for orders placed in this zone.
+        data_type: int
       - name: is_active
         description: Whether the zone is currently serviceable.
+        data_type: boolean
+      - name: city_id
+        data_type: bigint
+        tests: [not_null]
       - name: city_name
         description: Name of the city this zone belongs to.
+        data_type: string
       - name: country_code
         description: ISO country code of this zone's city.
+        data_type: string
       - name: timezone
         description: IANA timezone for this zone's city.
+        data_type: string
 
   - name: dim_date
     description: >
       Date dimension covering the generator's demand window, one row per date, derived
       directly from stg_demand_daily.
+    config:
+      contract:
+        enforced: true
     columns:
       - name: date_day
         description: Primary key.
+        data_type: date
         tests: [unique, not_null]
+      - name: day_index
+        data_type: int
+      - name: weekday
+        data_type: int
+      - name: dow_multiplier
+        data_type: double
+      - name: event_multiplier
+        data_type: double
       - name: is_weekend
+        data_type: boolean
         tests: [not_null]
+      - name: event_names
+        data_type: string
 
   - name: fct_orders
     description: >
       Order economics fact - grain is one row per order. subtotal/fees/commission carried
       from bronze via stg_orders; refund_amount and net_revenue computed in
       int_order_economics.
+    config:
+      contract:
+        enforced: true
     columns:
       - name: order_id
         description: Primary key (one row per order).
+        data_type: bigint
         tests: [unique, not_null]
+      - name: order_ref
+        data_type: string
       - name: customer_id
+        data_type: bigint
         tests:
           - not_null
           - relationships:
               to: ref('dim_customer')
               field: customer_id
       - name: restaurant_id
+        data_type: bigint
         tests:
           - not_null
           - relationships:
               to: ref('dim_restaurant')
               field: restaurant_id
       - name: zone_id
+        data_type: bigint
         tests:
           - not_null
           - relationships:
               to: ref('dim_zone')
               field: zone_id
       - name: date_day
+        data_type: date
         tests:
           - not_null
           - relationships:
               to: ref('dim_date')
               field: date_day
+      - name: placed_at
+        data_type: timestamp
       - name: order_status
         description: "Order lifecycle outcome: DELIVERED, CANCELLED, or UNFULFILLED."
+        data_type: string
       - name: subtotal
         description: Sum of line-item totals before delivery fee, carried from stg_orders.
+        data_type: decimal(18,2)
+      - name: delivery_fee
+        data_type: decimal(18,2)
+      - name: commission_pct
+        data_type: decimal(5,4)
       - name: commission_amount
         description: Platform commission owed by the restaurant on this order's subtotal.
+        data_type: decimal(18,2)
       - name: order_total
         description: Amount charged to the customer (subtotal plus delivery fee).
+        data_type: decimal(18,2)
       - name: refund_amount
         description: Total refunded against this order, computed in int_order_economics.
+        data_type: decimal(18,2)
+      - name: net_revenue
+        data_type: decimal(18,2)
+        tests: [not_null]
       - name: item_count
         description: Number of distinct line items on this order.
-      - name: net_revenue
-        tests: [not_null]
+        data_type: bigint
 
   - name: fct_deliveries
     description: >
       Delivery-operations fact - grain is one row per order's match outcome. Deliberately
       does NOT measure delivery-completion SLA - no such timestamp exists in bronze data yet
       (see spec section 9). Measures match acceptance, attempts-per-order, time-to-accept only.
+    config:
+      contract:
+        enforced: true
     columns:
       - name: order_id
         description: Primary key (one row per order).
+        data_type: bigint
         tests: [unique, not_null]
       - name: customer_id
+        data_type: bigint
         tests:
           - not_null
           - relationships:
               to: ref('dim_customer')
               field: customer_id
       - name: restaurant_id
+        data_type: bigint
         tests:
           - not_null
           - relationships:
               to: ref('dim_restaurant')
               field: restaurant_id
-      - name: was_matched
-        tests: [not_null]
-      - name: total_attempts
-        tests: [not_null]
       - name: zone_id
+        data_type: bigint
         tests:
           - not_null
           - relationships:
@@ -147,6 +260,7 @@ models:
               field: zone_id
       - name: date_day
         description: Calendar date the order was placed, derived from placed_at.
+        data_type: date
         tests:
           - not_null
           - relationships:
@@ -154,15 +268,25 @@ models:
               field: date_day
       - name: placed_at
         description: Timestamp the order was placed.
-      - name: accepted_at
-        description: Timestamp the accepted match's rider responded, if the order was matched.
-      - name: seconds_to_accept
-        description: Seconds between placed_at and accepted_at, null if the order was never matched.
+        data_type: timestamp
       - name: accepted_rider_id
         description: >
           Rider who accepted the match for this order. Nullable for UNFULFILLED/unmatched
           orders that never had an accepted match attempt.
+        data_type: bigint
         tests:
           - relationships:
               to: ref('dim_rider')
               field: rider_id
+      - name: total_attempts
+        data_type: bigint
+        tests: [not_null]
+      - name: was_matched
+        data_type: boolean
+        tests: [not_null]
+      - name: accepted_at
+        description: Timestamp the accepted match's rider responded, if the order was matched.
+        data_type: timestamp
+      - name: seconds_to_accept
+        description: Seconds between placed_at and accepted_at, null if the order was never matched.
+        data_type: bigint
