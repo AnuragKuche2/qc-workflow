@@ -66,11 +66,19 @@ def build_maintenance_tasks(dag):
 def check_maintenance_results(**context) -> None:
     """report's python_callable. Scans every task instance in the WHOLE dag run (not just
     the maintenance group) and raises if anything other than report itself failed. This is
-    deliberately broad, not a bug: the pipeline's earlier stages (generation, each dbt
-    build) all use the default trigger_rule="all_success", so if any of them had failed,
-    report's own upstream (the maintenance group) would never have started and report
-    would never reach this callable at all - by the time this code runs, only the
-    maintenance group's mapped tasks can plausibly be in a mixed success/failed state."""
+    deliberately broad, not a bug: `upstream_failed` is a member of Airflow's
+    State.finished, so when an earlier stage fails (generation, any dbt build), every
+    downstream task - including the whole maintenance TaskGroup - transitions to
+    upstream_failed rather than being skipped or left pending. report's
+    trigger_rule="all_done" is satisfied by upstream_failed just like success/failed, so
+    report still runs this callable even when an earlier stage failed; its upstream never
+    "never started." Because report is the DAG's only leaf task, Airflow derives the whole
+    DAG run's overall state from report's own state - so this whole-run scan is not an
+    unreachable safety net, it's the only mechanism that turns an earlier-stage failure into
+    a red DAG run at all. Narrowing this scan to just the maintenance group would silently
+    turn every non-maintenance failure into a reported SUCCESS (this project has already
+    been bitten by exactly that bug once - see the deleted old maintenance DAG's test
+    comments about an EmptyOperator leaf with trigger_rule="all_done")."""
     dag_run = context["dag_run"]
     task_instances = dag_run.get_task_instances()
     failed = []
@@ -83,5 +91,5 @@ def check_maintenance_results(**context) -> None:
         else:
             failed.append(ti.task_id)
     if failed:
-        raise AirflowException(f"Maintenance failed for: {failed}")
+        raise AirflowException(f"Pipeline failed at: {failed}")
     print("report: all pipeline stages succeeded")
