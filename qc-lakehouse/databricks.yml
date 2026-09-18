@@ -68,6 +68,26 @@ resources:
               - ./dist/*.whl
               - python-dotenv
 
+    apply_layouts:
+      name: apply_layouts
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/apply_layouts.py
+            # One layout per run - the original single-session, all-4-layouts script hit the
+            # same INVALID_HANDLE.OPERATION_ABANDONED session-duration failure
+            # generate_benchmark_orders.py hit at the 799M-row (561x) benchmark scale. Always
+            # override --layout explicitly (baseline/partitioned/zorder/liquid).
+            parameters: ["--layout", "baseline"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
     dbt_run:
       name: dbt_run
       tasks:
