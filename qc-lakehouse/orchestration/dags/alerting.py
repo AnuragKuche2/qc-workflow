@@ -1,6 +1,6 @@
 # qc-lakehouse/orchestration/dags/alerting.py
 """on_failure_callback for both qc_lakehouse DAGs: writes a structured failure record to
-qc_dev.ops.alerts via a single stateless call to the Databricks SQL Statement Execution API -
+qc_dev.ops.alerts via stateless calls to the Databricks SQL Statement Execution API -
 deliberately NOT Databricks Connect. This session live-verified (2026-09-17/18, the
 generate_benchmark_orders.py and apply_layouts.py incidents) that Databricks Connect sessions
 die under duration/idle limits; a failure callback must be fast and must never hold a
