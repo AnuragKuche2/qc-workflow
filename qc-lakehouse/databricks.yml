@@ -10,7 +10,8 @@ artifacts:
 variables:
   warehouse_id:
     description: >-
-      SQL warehouse ID used by the dbt_run/dbt_test jobs. Databricks UI: SQL Warehouses ->
+      SQL warehouse ID used by the dbt Databricks Jobs (dbt_build_test_staging,
+      dbt_build_test_intermediate, dbt_build_test_marts). Databricks UI: SQL Warehouses ->
       your warehouse -> Connection details -> HTTP Path (the ID is the trailing path segment).
       Override via `databricks bundle deploy --var="warehouse_id=..."` for a different workspace.
     default: ca865a4ef1668613
@@ -199,9 +200,11 @@ resources:
     # itself needed no change since it already just scans sys.argv for `--operation`.
     optimize_gold_table:
       name: optimize_gold_table
-      # Deliberate design choice, not an accidental default: keeps the 7 per-table Airflow
-      # chains' concurrent runs of this same job serialized, since Databricks itself
-      # serializes same-job concurrent runs by design here anyway.
+      # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
+      # fires up to 7 concurrent run-now calls against this one job (one per gold table).
+      # max_concurrent_runs: 1 serializes them Databricks-side - required because Free
+      # Edition caps concurrent job tasks at 5 account-wide, and a quota overrun shuts down
+      # all workspace compute for the day.
       max_concurrent_runs: 1
       tasks:
         - task_key: main
@@ -219,9 +222,11 @@ resources:
 
     analyze_gold_table:
       name: analyze_gold_table
-      # Deliberate design choice, not an accidental default: keeps the 7 per-table Airflow
-      # chains' concurrent runs of this same job serialized, since Databricks itself
-      # serializes same-job concurrent runs by design here anyway.
+      # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
+      # fires up to 7 concurrent run-now calls against this one job (one per gold table).
+      # max_concurrent_runs: 1 serializes them Databricks-side - required because Free
+      # Edition caps concurrent job tasks at 5 account-wide, and a quota overrun shuts down
+      # all workspace compute for the day.
       max_concurrent_runs: 1
       tasks:
         - task_key: main
@@ -239,9 +244,11 @@ resources:
 
     vacuum_gold_table:
       name: vacuum_gold_table
-      # Deliberate design choice, not an accidental default: keeps the 7 per-table Airflow
-      # chains' concurrent runs of this same job serialized, since Databricks itself
-      # serializes same-job concurrent runs by design here anyway.
+      # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
+      # fires up to 7 concurrent run-now calls against this one job (one per gold table).
+      # max_concurrent_runs: 1 serializes them Databricks-side - required because Free
+      # Edition caps concurrent job tasks at 5 account-wide, and a quota overrun shuts down
+      # all workspace compute for the day.
       max_concurrent_runs: 1
       tasks:
         - task_key: main

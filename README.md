@@ -104,7 +104,7 @@ qc-lakehouse/
 │   └── tests/*.sql                # singular cross-table invariant tests
 ├── orchestration/dags/
 │   ├── qc_lakehouse_pipeline.py    # main Airflow DAG
-│   └── qc_lakehouse_maintenance.py # OPTIMIZE/ANALYZE/VACUUM DAG
+│   └── maintenance.py              # dynamic-task-mapped gold-table maintenance, used by qc_lakehouse_pipeline.py
 └── tests/                          # pytest suite (generator, config, dbt-project structure)
 ```
 

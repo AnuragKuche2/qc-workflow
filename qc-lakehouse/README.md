@@ -193,21 +193,24 @@ set (see `dbt_project.yml`). Never commit a real value for it.
 
 ## Airflow DAG orchestration (Sub-project E1)
 
-Dockerized Airflow triggers 4 Databricks Jobs - `generate_reference_data`, `generate_fact_data`
-(Sub-project B1), `dbt_run`, `dbt_test` (Sub-project C) - via the Databricks Jobs API, in a
-single sequential DAG (`orchestration/dags/qc_lakehouse_pipeline.py`). Compute always happens on
-Databricks; Airflow only triggers and polls.
+Dockerized Airflow triggers 5 Databricks Jobs - `generate_reference_data`, `generate_fact_data`
+(Sub-project B1), and the three per-layer dbt jobs `dbt_build_test_staging`,
+`dbt_build_test_intermediate`, `dbt_build_test_marts` (Sub-project C) - via the Databricks Jobs
+API, in a single sequential DAG (`orchestration/dags/qc_lakehouse_pipeline.py`) that finishes
+with a `maintenance` TaskGroup (see "Performance, maintenance & cost lab" below). Compute always
+happens on Databricks; Airflow only triggers and polls.
 
-`databricks.yml` deploys `dbt_run` and `dbt_test` as Databricks Jobs (dbt's native `dbt_task`
-type, serverless, against the same `qc_dev` catalog as `make dbt-run`/`make dbt-test` above -
-`dbt_task` generates its own profile from `warehouse_id`/`catalog`/`schema` rather than passing
-`--target qc_dev`, so the two reach the same place by different mechanisms, not literally the
-same dbt target) - triggerable standalone via `databricks bundle run dbt_run -t dev` /
-`dbt_test -t dev`, and end-to-end live-verified as the last two steps of the
-`qc_lakehouse_pipeline` DAG.
+`databricks.yml` deploys `dbt_build_test_staging`, `dbt_build_test_intermediate`, and
+`dbt_build_test_marts` as Databricks Jobs (dbt's native `dbt_task` type, serverless, against the
+same `qc_dev` catalog as `make dbt-run`/`make dbt-test` above - `dbt_task` generates its own
+profile from `warehouse_id`/`catalog`/`schema` rather than passing `--target qc_dev`, so the two
+reach the same place by different mechanisms, not literally the same dbt target) - each runs
+`dbt build --select <layer>` (build+test interleaved per layer), triggerable standalone via
+`databricks bundle run dbt_build_test_staging -t dev` (and similarly for the other two layers),
+and end-to-end live-verified as steps of the `qc_lakehouse_pipeline` DAG.
 
 Because the `dbt_task` type has no field to reference a Databricks secret directly, and
-`{{secrets/scope/key}}` isn't resolved inside its `commands`, each of those two jobs runs a
+`{{secrets/scope/key}}` isn't resolved inside its `commands`, each of those three jobs runs a
 small `resolve_secrets` task first (`scripts/resolve_pii_salt.py`) that reads the
 `pii_hash_salt` secret from the `qc_lakehouse` Databricks secret scope and republishes it as a
 task value, which the dbt task then passes through via `--vars`. This is the same
@@ -217,10 +220,10 @@ env var should hold the same value, so hashes computed locally and on a Databric
 
 **Known limitation, not a fully-protected secret**: the dbt task echoes its own resolved shell
 command - including the substituted salt value - into that task's run output/logs in
-plaintext. Anyone with read/API access to a `dbt_run`/`dbt_test` job run can see the raw value
-there. This is accepted as reasonable for this project's single-user Free Edition workspace,
-but is a real exposure surface, not a secret-management best practice - re-examine before
-reusing this pattern anywhere with more than one reader of job run history.
+plaintext. Anyone with read/API access to one of the dbt Databricks Jobs' runs can see the raw
+value there. This is accepted as reasonable for this project's single-user Free Edition
+workspace, but is a real exposure surface, not a secret-management best practice - re-examine
+before reusing this pattern anywhere with more than one reader of job run history.
 
 Setup:
 
@@ -229,14 +232,14 @@ make install-airflow        # isolated .venv-airflow, for local DAG validation o
 databricks secrets create-scope qc_lakehouse
 databricks secrets put-secret qc_lakehouse pii_hash_salt   # same value as .env's PII_HASH_SALT
 make bundle-validate        # validates databricks.yml
-make bundle-deploy          # deploys the 4 jobs to the qc_dev workspace, serverless compute
+make bundle-deploy          # deploys the 5 jobs to the qc_dev workspace, serverless compute
 cd orchestration && cp .env.example .env   # fill in DATABRICKS_HOST
 docker compose up -d        # brings up Airflow at localhost:8080
 ```
 
-The secret scope must exist before `resolve_secrets` runs - without it, `dbt_run`/`dbt_test`
-fail two tasks into the DAG (after both generation jobs already succeeded) with an opaque
-`dbutils.secrets.get` error, rather than failing fast at setup time.
+The secret scope must exist before `resolve_secrets` runs - without it, `dbt_build_test_staging`
+(the first dbt Databricks Job) fails two tasks into the DAG (after both generation jobs already
+succeeded) with an opaque `dbutils.secrets.get` error, rather than failing fast at setup time.
 
 Then configure the `databricks_default` Airflow connection (Admin -> Connections in the UI, or
 `airflow connections add`: connection type `Databricks`, host your workspace URL, and a
@@ -247,14 +250,13 @@ container stays up for a long time (this pipeline's own live validation run took
 hit this), re-run the same connection setup with a fresh token rather than debugging a
 `403 Invalid Token` failure as something else.
 
-The DAG is manually-triggered only (no cron schedule) - the generator is deterministic, so a
-recurring schedule would just regenerate identical data. Each task has 2 retries with a
-2-minute delay, and the DAG has a logged deadline-miss warning (Airflow 3's replacement for the
-removed SLA feature - no live alerting channel exists for this portfolio project, so the
-callback logs what a production system would page on). The deadline uses
-`DeadlineReference.DAGRUN_QUEUED_AT`, not `DAGRUN_LOGICAL_DATE` - a manually-triggered run has
-no logical date, and a deadline reference that resolves against a null timestamp silently never
-fires (see the code comment in `qc_lakehouse_pipeline.py` for the live-verified detail).
+The DAG runs on an `@weekly` schedule and is also manually triggerable the same way as above.
+Each task has 2 retries with a 2-minute delay, and the DAG has a logged deadline-miss warning
+(Airflow 3's replacement for the removed SLA feature - no live alerting channel exists for this
+portfolio project, so the callback logs what a production system would page on). The deadline
+uses `DeadlineReference.DAGRUN_QUEUED_AT`, not `DAGRUN_LOGICAL_DATE` - a manually-triggered run
+has no logical date, and a deadline reference that resolves against a null timestamp silently
+never fires (see the code comment in `qc_lakehouse_pipeline.py` for the live-verified detail).
 
 `databricks.yml`'s `dev` target intentionally does not use bundle `mode: development` - that
 mode prefixes every deployed job's display name with `[dev <username>]`, which breaks the DAG's
@@ -291,16 +293,17 @@ ahead of ZORDER (421,585,617), partition-by-date (552,189,357), and no clusterin
 (zone_id)`, durably kept across future `dbt run`s via `liquid_clustered_by` in
 `fct_orders.sql`'s own dbt config, not just the one-time migration script).
 
-`OPTIMIZE`/`ANALYZE`/`VACUUM` for `fct_orders` are now real Databricks Jobs
-(`optimize_fct_orders`/`analyze_fct_orders`/`vacuum_fct_orders`), triggered via a new, separate
-`qc_lakehouse_maintenance` Airflow DAG (manual-trigger only, same as `qc_lakehouse_pipeline` -
-automatic scheduling is a deferred future upgrade, not built yet). Trigger it the same way as
-the main pipeline DAG: `docker compose exec airflow airflow dags trigger
-qc_lakehouse_maintenance`. Live-verified end to end through Airflow's own `job_name` lookup
-(not just `databricks bundle run`, which resolves job names differently - see E1's
-`mode: development` bug above for why this distinction matters): all 3 tasks succeeded in
-order, each against a real Databricks Jobs run ID confirmed both in the task's own Airflow log
-and independently via `databricks jobs get-run`.
+`OPTIMIZE`/`ANALYZE`/`VACUUM` are now real Databricks Jobs (`optimize_gold_table`/
+`analyze_gold_table`/`vacuum_gold_table`), run across all 7 gold tables as the final stage of
+the single `qc_lakehouse_pipeline` DAG rather than a separate DAG: a `maintenance` TaskGroup
+(`orchestration/dags/maintenance.py`) uses Airflow's dynamic task mapping (`.expand()`) to fan
+each of the 3 operations out across all 7 `GOLD_TABLES` entries, with a barrier between
+operations (every OPTIMIZE instance completes before any ANALYZE instance starts, and so on -
+see that file's module docstring for the full reasoning). It runs whenever
+`qc_lakehouse_pipeline` runs - on its `@weekly` schedule, or via a manual
+`airflow dags trigger qc_lakehouse_pipeline` - using the same `job_name` lookup mechanism as the
+rest of the DAG (not `databricks bundle run`, which resolves job names differently - see E1's
+`mode: development` bug above for why this distinction matters).
 
 The benchmark's own `qc_dev.perf_bench` schema currently still exists and holds this data
 (`orders_bench_baseline` at its original ~51.7x scale, and `orders_bench` extended to
