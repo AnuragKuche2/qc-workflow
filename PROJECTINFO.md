@@ -5,6 +5,55 @@ true right now, not aspirational. See [`README.md`](README.md) for the project p
 architecture, and `docs/superpowers/reports/2026-09-16-best-practices-evaluation.md` for the
 full 17-practice scorecard this list is drawn from.
 
+## Roadmap to completion (NOT done - project is not "complete" without these)
+
+Explicitly recorded per the user's own instruction (2026-09-18): this project is not to be
+considered complete at any stage until all of the below land, on top of the "Open gaps" list
+further down. Most of this is already in the design spec
+(`docs/superpowers/specs/2026-09-14-qc-lakehouse-databricks-hero-design.md`) as deferred/
+not-yet-built sub-projects, not new scope - cross-referenced below so this doesn't drift from
+that spec.
+
+1. **Streaming (Sub-projects B2/W1b + E2)** - spec section 4 explicitly tags these
+   `**streaming**` and marks them "deferred - not yet designed": Auto Loader ingestion of
+   `order_events`/`courier_shifts`/`gps_pings` (B2/W1b), plus an Airflow addition to trigger
+   and monitor that streaming job (E2). The current pipeline is batch-only; this is the
+   single biggest gap against "Databricks/Spark" as headline portfolio skills, since
+   Structured Streaming is commonly expected even for otherwise-batch-first DE roles.
+2. **Orchestration hardening (beyond E2's narrow scope)** - the spec's E2 is scoped only to
+   "trigger/monitor the streaming job," not general production-orchestration maturity. Adding
+   this as new scope, not yet speced anywhere: at least one scheduled (not manual-trigger-only)
+   DAG, failure alerting (even a simple Slack/email callback), and ideally a documented SLA on
+   at least one task. Flagged in the 2026-09-18 portfolio review as the cheapest
+   high-leverage fix available given "Airflow" is a headline skill but both current DAGs are
+   manual-trigger-only with no scheduling or alerting.
+3. **AI/RAG layer (Sub-project D)** - spec section 4: Claude-powered review-issue
+   classification (late delivery, food temperature/quality, wrong order, packaging, courier
+   behavior), aggregable by restaurant/city/cuisine; embeddings + Databricks Vector Search/AI
+   Functions for retrieval. Depends on C (done) and needs synthetic review/comment data that
+   doesn't exist yet (noted as an open item in spec section 9).
+4. **Text-to-SQL analytics agent (Sub-project G)** - spec section 4: a custom Claude-based
+   agent (natural-language question -> generated SQL -> executed against gold marts -> answer),
+   with its own prompting/schema-context/validation - explicitly not Databricks Genie. Depends
+   on C (done); D is optional enrichment for it.
+5. **Polish (Sub-project F)** - spec section 4: CI via GitHub Actions, Free Edition
+   credit/cost guardrails, README/narrative, and an **optional Streamlit dashboard**. Per the
+   2026-09-18 review, treat the Streamlit dashboard as required, not optional, for this
+   project specifically - it's the most direct fix for the "the 500x benchmark tooling has no
+   real downstream consumer" criticism, and gives the AI/text-to-SQL layer (D, G) an actual
+   interface once those exist.
+6. **A self-defensibility pass on the AI-agent-built work** - not a code artifact, a process
+   gap: per the 2026-09-18 portfolio review, be able to explain the core design decisions in
+   this repo (the ID-block collision scheme, the Liquid Clustering benchmark methodology, the
+   PII salting choice, the checkpoint/bailout design) from memory, unaided, before treating
+   any of this as interview-ready. This is the highest-risk item in the whole roadmap and the
+   only one that isn't fixable by writing more code.
+
+Build order for the above, per the existing spec's fixed order (A->B->C->E->H->D->G->F) plus
+the two new additions: **streaming (B2/W1b, E2) and orchestration hardening should land before
+D, G, F**, since D/G's own Airflow triggers get folded into E's DAG per spec section 4, and
+that DAG should already be mature (scheduled, alerting) before adding more triggers to it.
+
 ## Open gaps, ranked
 
 ### 1. `perf_lab` production/lab seam (not fixed)
