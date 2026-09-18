@@ -24,7 +24,12 @@ that spec.
    "trigger/monitor the streaming job," not general production-orchestration maturity. Adding
    this as new scope, not yet speced anywhere: at least one scheduled (not manual-trigger-only)
    DAG, failure alerting (even a simple Slack/email callback), and ideally a documented SLA on
-   at least one task. Flagged in the 2026-09-18 portfolio review as the cheapest
+   at least one task. Update (2026-09-18): the two DAGs this produced (`qc_lakehouse_pipeline`,
+   `qc_lakehouse_maintenance`) were subsequently merged into one medallion-shaped DAG -
+   having two DAGs meant maintenance ran on its own schedule with no dependency on whether
+   the pipeline that produces the gold tables it maintains had ever succeeded, and the
+   pipeline DAG's `dbt_run`/`dbt_test` pair built the entire dbt project before testing any
+   of it. See `docs/superpowers/specs/2026-09-18-qc-lakehouse-medallion-dag-redesign.md`. Flagged in the 2026-09-18 portfolio review as the cheapest
    high-leverage fix available given "Airflow" is a headline skill but both current DAGs are
    manual-trigger-only with no scheduling or alerting.
 3. **AI/RAG layer (Sub-project D)** - spec section 4: Claude-powered review-issue
@@ -64,7 +69,7 @@ throwaway and became real, permanently-deployed Databricks Jobs that run against
 data on a schedule:
 
 - `perf_lab/run_maintenance.py` - runs `OPTIMIZE`/`ANALYZE`/`VACUUM` on the real `fct_orders`
-  table, triggered by the real `qc_lakehouse_maintenance` Airflow DAG.
+  table, triggered by the real `qc_lakehouse_pipeline` Airflow DAG (part of the merged medallion DAG).
 - `perf_lab/apply_winning_layout.py` - applied the Liquid Clustering decision to the real
   `fct_orders` table.
 

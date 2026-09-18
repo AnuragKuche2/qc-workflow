@@ -27,13 +27,12 @@ flowchart TD
     BENCH -->|"won: Liquid Clustering\non zone_id"| GOLD
 
     subgraph AIRFLOW["Airflow orchestration (triggers only, never transforms)"]
-        DAG1["qc_lakehouse_pipeline DAG\ngenerate -> dbt run -> dbt test"]
-        DAG2["qc_lakehouse_maintenance DAG\nOPTIMIZE -> ANALYZE -> VACUUM"]
+        DAG1["qc_lakehouse_pipeline DAG (@weekly)\ngenerate -> build+test staging ->\nbuild+test intermediate -> build+test marts ->\nmaintain gold (dynamically mapped) -> report"]
     end
 
     DAG1 -->|"triggers real\nDatabricks Jobs"| GEN
     DAG1 -->|"triggers real\nDatabricks Jobs"| STG
-    DAG2 -->|"triggers real\nDatabricks Jobs"| GOLD
+    DAG1 -->|"triggers real\nDatabricks Jobs"| GOLD
 
     GOLD --> COST["cost_report.py\nreal system.billing.usage query,\nhonestly scoped (warehouse-hour,\nnot per-query)"]
 ```
@@ -49,8 +48,10 @@ chunked writes with two independent bailout mechanisms.
 **dbt** (`dbt-databricks`) - full medallion architecture (staging -> intermediate -> marts),
 `contract: enforced` + `data_type:` on every gold model, `not_null`/`unique` on all 14 bronze
 source primary keys, singular tests for cross-table invariants.
-**Apache Airflow** - two DAGs orchestrating real Databricks Jobs, idempotent task design, no
-transform logic in the scheduler.
+**Apache Airflow** - one medallion-shaped DAG orchestrating real Databricks Jobs, with
+per-layer build+test gating (a staging test failure blocks every downstream layer) and
+dynamic task mapping for gold-table maintenance, idempotent task design, no transform logic
+in the scheduler.
 **Tooling** - `uv` (dependency management), `pytest` + `ruff` (tests/lint), `make` (task
 runner).
 
