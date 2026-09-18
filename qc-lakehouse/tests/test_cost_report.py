@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from perf_lab.cost_report import (
+    build_scale_note,
     render_cost_section,
     render_duration_note,
     render_report,
@@ -30,6 +31,26 @@ SAMPLE_COST = {
         }
     ],
 }
+
+
+def test_build_scale_note_reports_the_measured_scale_without_a_stale_target_claim():
+    # Regression for a bug where regenerating the report would silently overwrite a corrected
+    # scale-note with a hardcoded, stale "500x target was not reached" claim - the note must be
+    # derived fresh from the live row count every time, and must never assert a target was "not
+    # reached" as a hardcoded fact.
+    note = build_scale_note(73_723_047, baseline_order_count=1_424_757)
+    assert "73,723,047 rows in orders_bench_baseline" in note
+    assert "~51.7x baseline" in note
+    assert "500x target" not in note
+    assert "not reached" not in note
+    # Must flag that the raw orders_bench source table can have grown separately since.
+    assert "orders_bench" in note.split("orders_bench_baseline", 1)[1]
+
+
+def test_build_scale_note_recomputes_the_multiplier_from_whatever_row_count_it_is_given():
+    note = build_scale_note(799_389_745, baseline_order_count=1_424_757)
+    assert "799,389,745 rows in orders_bench_baseline" in note
+    assert "~561.1x baseline" in note
 
 
 def test_summarize_by_layout_totals_duration_and_bytes_per_layout():

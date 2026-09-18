@@ -30,6 +30,22 @@ total_rows == distinct order_id count; (2) final per-block GROUP BY (order_id DI
 check: exactly 9 blocks, each with row count matching its invocation, each block's [min_id,
 max_id] strictly non-overlapping with all others.
 
+CAVEAT - windowed generation is NOT distributionally equivalent to one contiguous run: "the
+full 90-day window was reached" above means every calendar day got written, not that the
+result matches what a single 90-day `build_demand_curve` call would have produced. Each of the
+9 invocations calls `build_demand_curve` with only its own 10-day (or shorter) `config.days`
+slice and the SAME fixed `config.seed` (unchanged across invocations), so each invocation
+independently calls `resolve_events(EVENTS, config.days)` - deterministic given `days`, so a
+10-day invocation always resolves the same event at the same relative day-index - and seeds its
+noise RNG stream (`stream_seed(config.seed, "noise")`) fresh each time and draws exactly
+`config.days` values from it. Event-day placement and noise patterns therefore REPEAT
+per-window (the same relative event day, the same relative noise sequence, in every same-length
+window) rather than spanning the full 90-day window the way a single contiguous generation pass
+would. This does not invalidate Sub-project H's layout recommendation (that rests entirely on
+the original, unrelated 51.7x-scale contiguous run - see the report's addendum), but it is a
+real, non-cosmetic limitation of this windowed-resumable pattern worth knowing before reusing it
+for another generator.
+
 Each invocation covers a `BENCH_WINDOW_DAYS`-day slice starting `BENCH_DAY_OFFSET` days into
 the overall SCALE_MULTIPLIER/config.days target window, and appends to whatever earlier
 invocations already wrote (day_offset 0 is the only invocation allowed to overwrite, i.e. a
@@ -69,9 +85,18 @@ BAILOUT_THRESHOLD = 1.75
 # order_id is a contiguous integer computed fresh (starting near 1) by every independent
 # invocation's own build_orders_shell call - two invocations covering different calendar
 # windows would otherwise still collide on order_id. ID_BLOCK_SIZE reserves a per-day-offset
-# block of id space (id_offset_for_day_offset) comfortably above the realistic max orders/day
-# at SCALE_MULTIPLIER (500 * 15,000 baseline * ~1.06 event bump =~ 7.95M), so blocks from
-# different invocations can never overlap regardless of actual order counts.
+# block of id space (id_offset_for_day_offset): a `window_days`-day invocation gets
+# `window_days * ID_BLOCK_SIZE` contiguous ids before the next invocation's block starts.
+#
+# The naive per-day estimate (500 * 15,000 baseline * ~1.06 event bump =~ 7.95M orders/day)
+# is NOT the right number to size this against: this project's resumable design windows
+# generation into 10-day chunks, not single days, so a single invocation's real order count is
+# roughly 10x that per-day estimate, not 1x it. Live-verified worst case: the day_offset=60
+# invocation (a 10-day window, reserved 100,000,000 ids) generated 97,752,042 orders - a 2.2%
+# margin, not "comfortable". main() asserts the projected order count for THIS invocation
+# against its reserved block (see check_projected_orders_within_id_block) before any Spark
+# write happens, specifically so a larger window_days or a demand-curve change can never
+# silently blow through this and corrupt the next invocation's id range.
 ID_BLOCK_SIZE = 10_000_000
 
 
@@ -115,8 +140,16 @@ def parse_args(argv: list[str]) -> tuple[int, int]:
     """(day_offset, window_days) from `--day-offset N --window-days N` CLI flags (either
     order), matching the CLI-args convention `databricks.yml`'s spark_python_task.parameters
     already uses for run_maintenance.py - Databricks Jobs pass per-run overrides as argv, not
-    environment variables."""
-    day_offset, window_days = 0, 10
+    environment variables.
+
+    `--day-offset` is REQUIRED and any unrecognized token raises: day_offset=0 triggers
+    write_mode="overwrite" (wipes the whole table), so a missing or misspelled --day-offset
+    (e.g. --day_offset, --dayoffset) must fail loudly rather than silently defaulting to that
+    single most-destructive path - matching run_maintenance.py, which itself validates and
+    raises on a missing/unrecognized --operation rather than guessing one. `--window-days`
+    still defaults to 10 - it controls generation granularity, not overwrite-vs-append, so it
+    is not the dangerous parameter here."""
+    day_offset, window_days = None, 10
     i = 0
     while i < len(argv):
         if argv[i] == "--day-offset":
@@ -126,8 +159,39 @@ def parse_args(argv: list[str]) -> tuple[int, int]:
             window_days = int(argv[i + 1])
             i += 2
         else:
-            i += 1
+            raise ValueError(
+                f"generate-benchmark-orders: unrecognized argument {argv[i]!r} - expected "
+                "--day-offset (required) and/or --window-days."
+            )
+    if day_offset is None:
+        raise ValueError(
+            "generate-benchmark-orders: --day-offset is required (day_offset=0 triggers "
+            "write_mode='overwrite', wiping the whole table - refusing to silently default to "
+            "that)."
+        )
     return day_offset, window_days
+
+
+def check_projected_orders_within_id_block(
+    projected_orders: int, window_days: int, id_block_size: int = ID_BLOCK_SIZE
+) -> None:
+    """Raises ValueError if `projected_orders` - summed from the driver-side hourly demand
+    curve (the `hourly` list `build_demand_curve` returns), BEFORE any Spark write happens -
+    would meet or exceed the id space this invocation has reserved (`window_days *
+    id_block_size`; see ID_BLOCK_SIZE and id_offset_for_day_offset). Catching this here, cheaply
+    and pre-write, is the whole point: once this invocation's order_ids overrun their own
+    block, they silently collide with the NEXT invocation's block rather than failing this
+    invocation's own write - by the time that's visible (a downstream id-collision check), the
+    corrupting data is already durably written."""
+    reserved = window_days * id_block_size
+    if projected_orders >= reserved:
+        raise ValueError(
+            f"generate-benchmark-orders: projected {projected_orders:,} orders for this "
+            f"invocation would meet or exceed its reserved id block of {reserved:,} "
+            f"(window_days={window_days} * ID_BLOCK_SIZE={id_block_size:,}) - proceeding would "
+            "risk colliding with the next invocation's id block. Increase ID_BLOCK_SIZE or "
+            "reduce window_days before retrying."
+        )
 
 
 def should_bail_out(chunk_elapsed_seconds: list[float], threshold: float = BAILOUT_THRESHOLD) -> bool:
@@ -258,6 +322,10 @@ def main() -> None:
     menu_items_df = spark.table(f"{ref_catalog}.{ref_schema}.menu_items")
 
     _, hourly = build_demand_curve(config)
+    # Cheap, pre-write, Spark-free fail-fast: sums the driver-side hourly order counts (index 3
+    # of each (day_index, order_date, hour, orders) tuple) BEFORE any Spark write happens - see
+    # check_projected_orders_within_id_block and ID_BLOCK_SIZE's comment for why this matters.
+    check_projected_orders_within_id_block(sum(row[3] for row in hourly), window_days)
     demand_hourly_df = spark.createDataFrame(hourly, DEMAND_HOURLY_SCHEMA)
 
     # Built ONCE for the full scaled config - NOT once per chunk. build_orders_shell's

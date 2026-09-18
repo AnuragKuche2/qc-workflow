@@ -53,7 +53,12 @@ resources:
         - task_key: main
           spark_python_task:
             python_file: ./perf_lab/generate_benchmark_orders.py
-            parameters: ["--day-offset", "10", "--window-days", "10"]
+            # day_offset=90 is intentionally out of range (the full window is 90 days total) -
+            # resolve_window already raises a clear ValueError once day_offset >= total_days,
+            # so an accidental unparameterized "Run now"/retry fails fast instead of silently
+            # re-appending duplicate order_ids into an already-populated table. Always override
+            # both flags explicitly for a real invocation.
+            parameters: ["--day-offset", "90", "--window-days", "10"]
           environment_key: qc_lakehouse_env
       environments:
         - environment_key: qc_lakehouse_env

@@ -272,15 +272,24 @@ A deliberately large `orders` table was generated in an isolated `qc_dev.perf_be
 and compared across 4 physical layouts (no clustering, partition-by-date, `ZORDER BY zone_id`,
 Delta Liquid Clustering) - see
 `docs/superpowers/reports/2026-09-16-h-perf-cost-report.md` for the full comparison and
-reasoning. The generator targeted 500x the baseline order volume but a live Databricks Connect
-session error stopped it partway through, after 2 of 18 planned chunks had already landed
-durably: the accepted real scale is **73,723,047 rows (~51.7x baseline)**, judged sufficient
-for a meaningful layout comparison and not retried. **Delta Liquid Clustering on `zone_id`**
-won - lowest total bytes scanned (420,340,485) across the benchmark query set, ahead of ZORDER
-(421,585,617), partition-by-date (552,189,357), and no clustering (616,350,363) - and was
-applied to the real `fct_orders` table (`ALTER TABLE ... CLUSTER BY (zone_id)`, durably kept
-across future `dbt run`s via `liquid_clustered_by` in `fct_orders.sql`'s own dbt config, not
-just the one-time migration script).
+reasoning. The generator initially targeted 500x the baseline order volume, but a live
+Databricks Connect session error stopped the first (2026-09-15) attempt partway through, after
+2 of 18 planned chunks had already landed durably (73,723,047 rows, ~51.7x baseline). **The
+layout comparison and recommendation below are measured against that original 51.7x-scale
+run** - it was judged sufficient for a meaningful comparison, and the layouts were never
+re-benchmarked at a larger scale. Separately, a resumable-generation capability (added later;
+see `perf_lab/generate_benchmark_orders.py`'s own module docstring for full detail, including
+its caveat that windowed/resumed generation is not distributionally equivalent to a single
+contiguous run) was used across 9 total invocations to extend the raw `orders_bench` source
+table to its real final scale of **799,389,745 rows (~561x baseline)**, reaching the full
+90-day window (2026-06-01 through 2026-08-30, exclusive end). This later extension grew the raw
+generation table only - it did not re-run or change the layout comparison itself; see the cost
+report's addendum for the full split between the two numbers. **Delta Liquid Clustering on
+`zone_id`** won - lowest total bytes scanned (420,340,485) across the benchmark query set,
+ahead of ZORDER (421,585,617), partition-by-date (552,189,357), and no clustering
+(616,350,363) - and was applied to the real `fct_orders` table (`ALTER TABLE ... CLUSTER BY
+(zone_id)`, durably kept across future `dbt run`s via `liquid_clustered_by` in
+`fct_orders.sql`'s own dbt config, not just the one-time migration script).
 
 `OPTIMIZE`/`ANALYZE`/`VACUUM` for `fct_orders` are now real Databricks Jobs
 (`optimize_fct_orders`/`analyze_fct_orders`/`vacuum_fct_orders`), triggered via a new, separate
@@ -293,6 +302,7 @@ qc_lakehouse_maintenance`. Live-verified end to end through Airflow's own `job_n
 order, each against a real Databricks Jobs run ID confirmed both in the task's own Airflow log
 and independently via `databricks jobs get-run`.
 
-The benchmark's own `qc_dev.perf_bench` schema was dropped (`DROP SCHEMA ... CASCADE`) after
-the winning layout had already been applied to `fct_orders` - it was a one-time analysis, not
-an ongoing artifact, and `SHOW SCHEMAS IN qc_dev` no longer lists it.
+The benchmark's own `qc_dev.perf_bench` schema currently still exists and holds this data
+(`orders_bench_baseline` at its original ~51.7x scale, and `orders_bench` extended to
+~561x) - it was not dropped after the winning layout was applied to `fct_orders`. Whether to
+drop it now is a separate decision that has not been made.

@@ -1,6 +1,9 @@
 # qc-lakehouse/tests/test_generate_benchmark_orders.py
+import pytest
+
 from perf_lab.generate_benchmark_orders import (
     _run_chunks,
+    check_projected_orders_within_id_block,
     chunk_date_ranges,
     id_offset_for_day_offset,
     parse_args,
@@ -121,6 +124,26 @@ def test_run_chunks_appends_the_first_chunk_when_resuming():
     ]
 
 
+def test_check_projected_orders_within_id_block_passes_when_comfortably_under():
+    # 10-day window, 100M reserved (10 * 10M) - 50M projected is comfortably under.
+    check_projected_orders_within_id_block(50_000_000, window_days=10, id_block_size=10_000_000)
+
+
+def test_check_projected_orders_within_id_block_raises_at_the_observed_worst_case_margin():
+    # Mirrors the live-verified day_offset=60 worst case: 97,752,042 projected orders against
+    # a 100,000,000-id reserved block is only a 2.2% margin - still technically under, so this
+    # must NOT raise here, but confirms the boundary is where the review found it.
+    check_projected_orders_within_id_block(97_752_042, window_days=10, id_block_size=10_000_000)
+
+
+def test_check_projected_orders_within_id_block_raises_when_projected_meets_or_exceeds_reserved():
+    with pytest.raises(ValueError, match="reserved id block"):
+        check_projected_orders_within_id_block(100_000_000, window_days=10, id_block_size=10_000_000)
+
+    with pytest.raises(ValueError, match="reserved id block"):
+        check_projected_orders_within_id_block(150_000_000, window_days=10, id_block_size=10_000_000)
+
+
 def test_id_offset_for_day_offset_is_zero_at_the_start():
     assert id_offset_for_day_offset(0, id_block_size=10_000_000) == 0
 
@@ -193,8 +216,17 @@ def test_run_chunks_still_bails_out_on_a_slow_chunk_without_raising(monkeypatch)
     assert stopped_early is True  # the slow-chunk bailout is a real early stop too
 
 
-def test_parse_args_defaults_to_zero_offset_and_ten_day_window():
-    assert parse_args([]) == (0, 10)
+def test_parse_args_requires_day_offset_rather_than_defaulting_to_the_destructive_zero():
+    # day_offset=0 triggers write_mode="overwrite" (wipes the whole table) - a missing or
+    # misspelled --day-offset flag must fail loudly, never silently take that most-destructive
+    # path.
+    with pytest.raises(ValueError, match="day-offset"):
+        parse_args([])
+
+
+def test_parse_args_raises_on_an_unrecognized_flag():
+    with pytest.raises(ValueError, match="--dayoffset"):
+        parse_args(["--dayoffset", "20"])
 
 
 def test_parse_args_reads_both_flags():
