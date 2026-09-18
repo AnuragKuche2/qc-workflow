@@ -12,16 +12,26 @@ Runs via serverless Spark (build_databricks_session), never the SQL warehouse - 
 benchmark queries (Task 3) are what actually need system.query.history, which only tracks
 warehouse-executed queries; this script's plain writes don't need that signal.
 
-ACCEPTED REALIZED SCALE (live run of 2026-09-15): the checkpoint fired early - not via the
-should_bail_out slow-chunk threshold, but via a hard Databricks Connect session error mid-run
-(see _run_chunks's docstring). qc_dev.perf_bench.orders_bench currently holds 73,723,047
-rows (~51.7x baseline, NOT the 500x/~675M target below) covering date_day 2026-06-01 through
-2026-06-10 inclusive (2 of the planned 18 chunks). This has been accepted as this benchmark's
-final scale - no further live generation of this table is authorized. Task 2+ must build
-against these real numbers, not against SCALE_MULTIPLIER/config.days below.
+HISTORY (live run of 2026-09-15): the checkpoint fired early - not via the should_bail_out
+slow-chunk threshold, but via a hard Databricks Connect session error mid-run (see
+_run_chunks's docstring) - after 2 of the planned 18 chunks landed (73,723,047 rows,
+~51.7x baseline). That run used a single continuous session for all 18 chunks; this script
+now supports resuming across several independent, short-lived sessions instead (see
+BENCH_DAY_OFFSET/BENCH_WINDOW_DAYS below), so a session-duration limit no longer caps the
+achievable total scale - it only caps how much one invocation can add at a time.
+
+Each invocation covers a `BENCH_WINDOW_DAYS`-day slice starting `BENCH_DAY_OFFSET` days into
+the overall SCALE_MULTIPLIER/config.days target window, and appends to whatever earlier
+invocations already wrote (day_offset 0 is the only invocation allowed to overwrite, i.e. a
+genuine from-scratch run). order_id would otherwise collide across invocations - it's a
+contiguous integer computed fresh, starting near 1, by every independent build_orders_shell
+call, regardless of calendar date - so every invocation's order_id is shifted by
+id_offset_for_day_offset(BENCH_DAY_OFFSET), reserving a non-overlapping ID_BLOCK_SIZE-sized
+block per day-offset.
 """
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import replace
 from datetime import date, timedelta
@@ -46,6 +56,14 @@ SCALE_MULTIPLIER = 500
 CHUNK_DAYS = 5
 BAILOUT_THRESHOLD = 1.75
 
+# order_id is a contiguous integer computed fresh (starting near 1) by every independent
+# invocation's own build_orders_shell call - two invocations covering different calendar
+# windows would otherwise still collide on order_id. ID_BLOCK_SIZE reserves a per-day-offset
+# block of id space (id_offset_for_day_offset) comfortably above the realistic max orders/day
+# at SCALE_MULTIPLIER (500 * 15,000 baseline * ~1.06 event bump =~ 7.95M), so blocks from
+# different invocations can never overlap regardless of actual order counts.
+ID_BLOCK_SIZE = 10_000_000
+
 
 def chunk_date_ranges(start_date: str, days: int, chunk_days: int) -> list[tuple[str, str]]:
     """(chunk_start_iso, chunk_end_exclusive_iso) pairs covering [start_date, start_date+days)
@@ -60,6 +78,46 @@ def chunk_date_ranges(start_date: str, days: int, chunk_days: int) -> list[tuple
         chunks.append((chunk_start.isoformat(), chunk_end.isoformat()))
         day += chunk_len
     return chunks
+
+
+def id_offset_for_day_offset(day_offset: int, id_block_size: int = ID_BLOCK_SIZE) -> int:
+    """The order_id offset a resumed invocation starting `day_offset` days into the overall
+    window must add to every order_id it generates, so its ids can never collide with an
+    earlier invocation's - see ID_BLOCK_SIZE."""
+    return day_offset * id_block_size
+
+
+def resolve_window(base_start_date: str, day_offset: int, window_days: int, total_days: int) -> tuple[str, int]:
+    """The (start_date, days) a single invocation should generate, `day_offset` days into
+    the overall `total_days`-day target window - shifted by `day_offset` and clamped so it
+    never runs past `total_days`, however large `window_days` is."""
+    if day_offset >= total_days:
+        raise ValueError(
+            f"day_offset ({day_offset}) already covers or exceeds total_days ({total_days}) - "
+            "nothing left for this invocation to generate."
+        )
+    start_date = (date.fromisoformat(base_start_date) + timedelta(days=day_offset)).isoformat()
+    days = min(window_days, total_days - day_offset)
+    return start_date, days
+
+
+def parse_args(argv: list[str]) -> tuple[int, int]:
+    """(day_offset, window_days) from `--day-offset N --window-days N` CLI flags (either
+    order), matching the CLI-args convention `databricks.yml`'s spark_python_task.parameters
+    already uses for run_maintenance.py - Databricks Jobs pass per-run overrides as argv, not
+    environment variables."""
+    day_offset, window_days = 0, 10
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--day-offset":
+            day_offset = int(argv[i + 1])
+            i += 2
+        elif argv[i] == "--window-days":
+            window_days = int(argv[i + 1])
+            i += 2
+        else:
+            i += 1
+    return day_offset, window_days
 
 
 def should_bail_out(chunk_elapsed_seconds: list[float], threshold: float = BAILOUT_THRESHOLD) -> bool:
@@ -82,6 +140,7 @@ def _run_chunks(
     chunks: list[tuple[str, str]],
     write_chunk,
     start_date: str,
+    first_chunk_write_mode: str = "overwrite",
 ) -> tuple[int, str, list[float], bool]:
     """Runs `write_chunk(chunk_start, chunk_end, write_mode) -> row_count` once per chunk,
     in order, and stops - cleanly, never by crashing - the first time either checkpoint
@@ -116,7 +175,7 @@ def _run_chunks(
     stopped_early = False
 
     for i, (chunk_start, chunk_end) in enumerate(chunks):
-        write_mode = "overwrite" if i == 0 else "append"
+        write_mode = first_chunk_write_mode if i == 0 else "append"
 
         t0 = time.time()
         try:
@@ -153,9 +212,29 @@ def main() -> None:
     settings = None if is_running_on_databricks() else load_settings()
     spark = build_databricks_session(settings)
 
-    config = _scaled_config()
-    print(f"generate-benchmark-orders: target scale {SCALE_MULTIPLIER}x "
-          f"(orders_per_day={config.orders_per_day:,}, days={config.days})")
+    full_config = _scaled_config()
+
+    # BENCH_DAY_OFFSET/BENCH_WINDOW_DAYS split the full SCALE_MULTIPLIER/90-day target across
+    # several short, independent invocations - each a fresh Databricks Connect session with
+    # its own session-duration budget - instead of one long session attempting all 18 chunks
+    # at once (Task 1's live run: a hard session error killed that after 2 of 18 chunks).
+    # day_offset 0 is a from-scratch invocation (overwrite); any later offset is a resume
+    # (append) into the table an earlier invocation already started.
+    day_offset, window_days = parse_args(sys.argv[1:])
+    start_date, days = resolve_window(
+        base_start_date=full_config.start_date,
+        day_offset=day_offset,
+        window_days=window_days,
+        total_days=full_config.days,
+    )
+    config = replace(full_config, start_date=start_date, days=days)
+    id_offset = id_offset_for_day_offset(day_offset)
+    first_chunk_write_mode = "overwrite" if day_offset == 0 else "append"
+
+    print(f"generate-benchmark-orders: target scale {SCALE_MULTIPLIER}x overall "
+          f"(orders_per_day={config.orders_per_day:,}) - this invocation covers "
+          f"[{config.start_date}, +{config.days}d) (day_offset={day_offset}, "
+          f"id_offset={id_offset:,}, first_chunk_write_mode={first_chunk_write_mode})")
 
     # Reference data (zones, restaurants, customers, their profile tables) is read at its
     # EXISTING real scale from Sub-project B1's already-written tables - only order VOLUME
@@ -180,6 +259,12 @@ def main() -> None:
         spark, config, demand_hourly_df, restaurant_profile_df, customer_profile_df,
         customers_df, zones_df, restaurants_df,
     )
+    if id_offset:
+        # Applied before order_items_df is built, so the offset order_id is what
+        # order_items' FK join (and everything downstream) sees consistently.
+        orders_shell_df = orders_shell_df.withColumn(
+            "order_id", F.col("order_id") + F.lit(id_offset)
+        )
     order_items_df = build_order_items(config, orders_shell_df, menu_items_df)
     orders_df = finalize_orders(config, orders_shell_df, order_items_df).withColumn(
         "date_day", F.to_date("placed_at")
@@ -198,7 +283,7 @@ def main() -> None:
 
     chunks = chunk_date_ranges(config.start_date, config.days, CHUNK_DAYS)
     total_rows, reached_chunk_end, _, stopped_early = _run_chunks(
-        chunks, write_chunk, config.start_date
+        chunks, write_chunk, config.start_date, first_chunk_write_mode=first_chunk_write_mode
     )
 
     actual_scale = total_rows / 1_424_757  # baseline order count measured 2026-09-15
@@ -207,9 +292,10 @@ def main() -> None:
     # nobody's watching the live chunk-by-chunk output) can't look identical in its own final
     # line to a run that actually reached the end of `chunks`.
     status = "STOPPED EARLY" if stopped_early else "OK"
-    print(f"\ngenerate-benchmark-orders: {status} - wrote {total_rows:,} rows to {table} "
-          f"(covers [{config.start_date}, {reached_chunk_end}), "
-          f"~{actual_scale:.0f}x baseline scale)")
+    print(f"\ngenerate-benchmark-orders: {status} - this invocation wrote {total_rows:,} rows "
+          f"to {table} (covers [{config.start_date}, {reached_chunk_end}), "
+          f"~{actual_scale:.0f}x baseline scale for THIS invocation alone - query the table "
+          f"for the true cumulative total across all invocations)")
 
 
 if __name__ == "__main__":

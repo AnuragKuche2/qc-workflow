@@ -1,5 +1,12 @@
 # qc-lakehouse/tests/test_generate_benchmark_orders.py
-from perf_lab.generate_benchmark_orders import _run_chunks, chunk_date_ranges, should_bail_out
+from perf_lab.generate_benchmark_orders import (
+    _run_chunks,
+    chunk_date_ranges,
+    id_offset_for_day_offset,
+    parse_args,
+    resolve_window,
+    should_bail_out,
+)
 
 
 def test_chunk_date_ranges_splits_evenly():
@@ -96,6 +103,66 @@ def test_run_chunks_stops_cleanly_when_a_chunk_write_raises(capsys):
     assert "SESSION_NOT_FOUND" in out
 
 
+def test_run_chunks_appends_the_first_chunk_when_resuming():
+    # A resumed invocation (BENCH_DAY_OFFSET > 0) must never overwrite what a prior
+    # invocation already wrote - only a from-scratch invocation (day_offset 0) may.
+    chunks = [("2026-06-21", "2026-06-26"), ("2026-06-26", "2026-07-01")]
+    calls = []
+
+    def write_chunk(chunk_start, chunk_end, write_mode):
+        calls.append((chunk_start, chunk_end, write_mode))
+        return 100
+
+    _run_chunks(chunks, write_chunk, "2026-06-21", first_chunk_write_mode="append")
+
+    assert calls == [
+        ("2026-06-21", "2026-06-26", "append"),
+        ("2026-06-26", "2026-07-01", "append"),
+    ]
+
+
+def test_id_offset_for_day_offset_is_zero_at_the_start():
+    assert id_offset_for_day_offset(0, id_block_size=10_000_000) == 0
+
+
+def test_id_offset_for_day_offset_scales_by_block_size():
+    assert id_offset_for_day_offset(20, id_block_size=10_000_000) == 200_000_000
+
+
+def test_resolve_window_returns_the_full_window_when_it_fits():
+    start_date, days = resolve_window(
+        base_start_date="2026-06-01", day_offset=0, window_days=20, total_days=90
+    )
+    assert start_date == "2026-06-01"
+    assert days == 20
+
+
+def test_resolve_window_shifts_the_start_date_by_the_offset():
+    start_date, days = resolve_window(
+        base_start_date="2026-06-01", day_offset=20, window_days=20, total_days=90
+    )
+    assert start_date == "2026-06-21"
+    assert days == 20
+
+
+def test_resolve_window_clamps_to_the_remaining_days():
+    start_date, days = resolve_window(
+        base_start_date="2026-06-01", day_offset=80, window_days=20, total_days=90
+    )
+    assert start_date == "2026-08-20"
+    assert days == 10
+
+
+def test_resolve_window_raises_once_the_offset_reaches_the_total():
+    # An offset >= total_days means every day is already covered - there is nothing left
+    # for this invocation to do, and silently returning a 0-day window would let a caller
+    # mistake "nothing to do" for "ran successfully".
+    import pytest
+
+    with pytest.raises(ValueError, match="day_offset"):
+        resolve_window(base_start_date="2026-06-01", day_offset=90, window_days=20, total_days=90)
+
+
 def test_run_chunks_still_bails_out_on_a_slow_chunk_without_raising(monkeypatch):
     # The pre-existing slow-chunk checkpoint (should_bail_out) still works through
     # _run_chunks after the refactor - no exception involved here at all.
@@ -124,3 +191,15 @@ def test_run_chunks_still_bails_out_on_a_slow_chunk_without_raising(monkeypatch)
     assert reached_chunk_end == "2026-06-16"
     assert elapsed == [10.0, 10.0, 20.0]
     assert stopped_early is True  # the slow-chunk bailout is a real early stop too
+
+
+def test_parse_args_defaults_to_zero_offset_and_ten_day_window():
+    assert parse_args([]) == (0, 10)
+
+
+def test_parse_args_reads_both_flags():
+    assert parse_args(["--day-offset", "20", "--window-days", "15"]) == (20, 15)
+
+
+def test_parse_args_reads_flags_in_either_order():
+    assert parse_args(["--window-days", "15", "--day-offset", "20"]) == (20, 15)
