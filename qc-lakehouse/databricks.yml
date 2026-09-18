@@ -47,6 +47,22 @@ resources:
               - ./dist/*.whl
               - python-dotenv
 
+    generate_benchmark_orders:
+      name: generate_benchmark_orders
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/generate_benchmark_orders.py
+            parameters: ["--day-offset", "10", "--window-days", "10"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
     dbt_run:
       name: dbt_run
       tasks:
