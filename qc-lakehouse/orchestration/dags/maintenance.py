@@ -64,8 +64,8 @@ def build_maintenance_tasks(dag):
 
 
 def check_maintenance_results(**context) -> None:
-    """report's python_callable. Scans every task instance in the WHOLE dag run (not just
-    the maintenance group) and raises if anything other than report itself failed. This is
+    """report's python_callable. Scans every task in the WHOLE dag run (not just the
+    maintenance group) and raises if anything other than report itself failed. This is
     deliberately broad, not a bug: `upstream_failed` is a member of Airflow's
     State.finished, so when an earlier stage fails (generation, any dbt build), every
     downstream task - including the whole maintenance TaskGroup - transitions to
@@ -78,18 +78,27 @@ def check_maintenance_results(**context) -> None:
     a red DAG run at all. Narrowing this scan to just the maintenance group would silently
     turn every non-maintenance failure into a reported SUCCESS (this project has already
     been bitten by exactly that bug once - see the deleted old maintenance DAG's test
-    comments about an EmptyOperator leaf with trigger_rule="all_done")."""
+    comments about an EmptyOperator leaf with trigger_rule="all_done").
+
+    IMPORTANT: `context["dag_run"]` in Airflow's Task SDK (3.x) is a lightweight Pydantic
+    data object for inter-process communication, not the classic `airflow.models.DagRun`
+    ORM object - it has no `.get_task_instances()` (confirmed live: this exact call raised
+    `AttributeError: 'DagRun' object has no attribute 'get_task_instances'` against a real
+    run of this DAG, since tasks execute in an isolated process with no direct DB access by
+    design in Airflow 3.x). The supported replacement is `context["ti"].get_task_states(...)`,
+    which round-trips through the real Task Execution API
+    (airflow.api_fastapi.execution_api.routes.task_instances.get_task_instance_states) and
+    returns `{run_id: {task_key: state}}`, where a mapped task's key is
+    f"{task_id}_{map_index}" (e.g. "maintenance.optimize_3"), not the `task_id[map_index]`
+    formatting an earlier version of this function synthesized by hand."""
+    ti = context["ti"]
     dag_run = context["dag_run"]
-    task_instances = dag_run.get_task_instances()
-    failed = []
-    for ti in task_instances:
-        if ti.task_id == "report" or ti.state != "failed":
-            continue
-        map_index = getattr(ti, "map_index", -1)
-        if map_index is not None and map_index != -1:
-            failed.append(f"{ti.task_id}[{map_index}]")
-        else:
-            failed.append(ti.task_id)
+    task_states = ti.get_task_states(dag_id=dag_run.dag_id, run_ids=[dag_run.run_id])
+    states_for_this_run = task_states.get(dag_run.run_id, {})
+    failed = [
+        task_key for task_key, state in states_for_this_run.items()
+        if state == "failed" and task_key != "report"
+    ]
     if failed:
         raise AirflowException(f"Pipeline failed at: {failed}")
     print("report: all pipeline stages succeeded")

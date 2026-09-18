@@ -66,39 +66,46 @@ def test_build_maintenance_tasks_chains_optimize_then_analyze_then_vacuum():
     assert final_task.task_id == "maintenance.vacuum"
 
 
-def test_check_maintenance_results_raises_with_map_index_when_a_mapped_task_failed():
-    class _FakeTI:
-        def __init__(self, task_id, state, map_index=-1):
-            self.task_id = task_id
-            self.state = state
-            self.map_index = map_index
-
+def test_check_maintenance_results_raises_with_the_real_task_states_api_shape_when_a_mapped_task_failed():
+    # context["dag_run"] in Airflow's Task SDK (3.x) is a lightweight data object with no
+    # .get_task_instances() - confirmed live against a real run of this DAG. The supported
+    # replacement is context["ti"].get_task_states(...), which returns
+    # {run_id: {task_key: state}}, where a mapped task's key is f"{task_id}_{map_index}"
+    # (see airflow.api_fastapi.execution_api.routes.task_instances.get_task_instance_states).
     class _FakeDagRun:
-        def get_task_instances(self):
-            return [
-                _FakeTI("generate_reference_data", "success"),
-                _FakeTI("maintenance.optimize", "success", map_index=0),
-                _FakeTI("maintenance.optimize", "failed", map_index=1),
-                _FakeTI("report", "running"),
-            ]
+        dag_id = "qc_lakehouse_pipeline"
+        run_id = "manual__test"
 
-    with pytest.raises(AirflowException, match=r"maintenance\.optimize\[1\]"):
-        check_maintenance_results(dag_run=_FakeDagRun())
+    class _FakeTI:
+        def get_task_states(self, dag_id, run_ids):
+            assert dag_id == "qc_lakehouse_pipeline"
+            assert run_ids == ["manual__test"]
+            return {
+                "manual__test": {
+                    "generate_reference_data": "success",
+                    "maintenance.optimize_0": "success",
+                    "maintenance.optimize_1": "failed",
+                    "report": "running",
+                },
+            }
+
+    with pytest.raises(AirflowException, match=r"maintenance\.optimize_1"):
+        check_maintenance_results(ti=_FakeTI(), dag_run=_FakeDagRun())
 
 
 def test_check_maintenance_results_passes_when_everything_succeeded():
-    class _FakeTI:
-        def __init__(self, task_id, state, map_index=-1):
-            self.task_id = task_id
-            self.state = state
-            self.map_index = map_index
-
     class _FakeDagRun:
-        def get_task_instances(self):
-            return [
-                _FakeTI("generate_reference_data", "success"),
-                _FakeTI("maintenance.vacuum", "success", map_index=6),
-                _FakeTI("report", "running"),
-            ]
+        dag_id = "qc_lakehouse_pipeline"
+        run_id = "manual__test"
 
-    check_maintenance_results(dag_run=_FakeDagRun())  # must not raise
+    class _FakeTI:
+        def get_task_states(self, dag_id, run_ids):
+            return {
+                "manual__test": {
+                    "generate_reference_data": "success",
+                    "maintenance.vacuum_6": "success",
+                    "report": "running",
+                },
+            }
+
+    check_maintenance_results(ti=_FakeTI(), dag_run=_FakeDagRun())  # must not raise

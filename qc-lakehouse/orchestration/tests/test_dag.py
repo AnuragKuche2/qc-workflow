@@ -162,21 +162,26 @@ def test_pipeline_dag_job_names_and_layer_selectors_match_databricks_yml():
 
 
 def test_check_maintenance_results_raises_when_a_table_task_failed():
+    # context["dag_run"] in Airflow's Task SDK (3.x) has no .get_task_instances() -
+    # confirmed live against a real run of this DAG (AttributeError: 'DagRun' object has no
+    # attribute 'get_task_instances'). The supported replacement is
+    # context["ti"].get_task_states(...), returning {run_id: {task_key: state}} with mapped
+    # tasks keyed as f"{task_id}_{map_index}".
     from maintenance import check_maintenance_results
 
-    class _FakeTI:
-        def __init__(self, task_id, state, map_index=-1):
-            self.task_id = task_id
-            self.state = state
-            self.map_index = map_index
-
     class _FakeDagRun:
-        def get_task_instances(self):
-            return [
-                _FakeTI("maintenance.optimize", "success", map_index=0),
-                _FakeTI("maintenance.analyze", "failed", map_index=2),
-                _FakeTI("report", "running"),
-            ]
+        dag_id = "qc_lakehouse_pipeline"
+        run_id = "manual__test"
 
-    with pytest.raises(AirflowException, match=r"maintenance\.analyze\[2\]"):
-        check_maintenance_results(dag_run=_FakeDagRun())
+    class _FakeTI:
+        def get_task_states(self, dag_id, run_ids):
+            return {
+                "manual__test": {
+                    "maintenance.optimize_0": "success",
+                    "maintenance.analyze_2": "failed",
+                    "report": "running",
+                },
+            }
+
+    with pytest.raises(AirflowException, match=r"maintenance\.analyze_2"):
+        check_maintenance_results(ti=_FakeTI(), dag_run=_FakeDagRun())
