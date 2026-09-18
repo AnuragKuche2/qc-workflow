@@ -6,6 +6,7 @@ from datetime import timedelta
 from airflow import DAG
 from airflow.providers.databricks.operators.databricks import DatabricksRunNowOperator
 from airflow.sdk import DeadlineAlert, DeadlineReference, SyncCallback
+from alerting import alert_on_failure
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ DEFAULT_ARGS = {
     "owner": "qc_lakehouse",
     "retries": 2,
     "retry_delay": timedelta(minutes=2),
+    "on_failure_callback": alert_on_failure,
 }
 
 # Budget for the whole pipeline (sum of the per-job budgets the design called for:
