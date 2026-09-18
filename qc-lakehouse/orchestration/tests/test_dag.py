@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from airflow.exceptions import AirflowException
 
 DAGS_DIR = Path(__file__).resolve().parents[1] / "dags"
 sys.path.insert(0, str(DAGS_DIR))
@@ -58,6 +59,20 @@ def test_pipeline_dag_has_no_schedule():
     dag = dagbag.get_dag("qc_lakehouse_pipeline")
     assert dag.schedule is None
     assert dag.timetable.can_be_scheduled is False
+
+
+def test_pipeline_dag_every_task_has_the_alert_callback():
+    # alerting.py's docstring claims it's the callback "for both qc_lakehouse DAGs," but
+    # only qc_lakehouse_maintenance actually wired it in. Fixed by wiring it into
+    # qc_lakehouse_pipeline's own DEFAULT_ARGS too - it's arguably the higher-value DAG to
+    # alert on.
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_pipeline")
+    from alerting import alert_on_failure
+
+    for task_id in dag.task_ids:
+        task = dag.get_task(task_id)
+        assert task.on_failure_callback == [alert_on_failure]
 
 
 @pytest.mark.parametrize("dag_id", ["qc_lakehouse_pipeline", "qc_lakehouse_maintenance"])
@@ -156,11 +171,62 @@ def test_maintenance_dag_report_task_fans_in_from_every_chain_with_all_done():
     assert report.upstream_task_ids == expected_upstream
     assert report.trigger_rule == "all_done"
 
+    # Regression test: an EmptyOperator leaf with trigger_rule="all_done" made every DAG run
+    # report SUCCESS regardless of upstream failures, since Airflow derives run state from
+    # leaf tasks. maintenance_report must be a real PythonOperator that inspects upstream
+    # task states and raises if any failed.
+    # NOTE: DagBag loads DAG files under a generated "unusual_prefix_..." module name,
+    # distinct from a plain `import qc_lakehouse_maintenance` - so the callable object it
+    # attaches to the task is never `is` a separately-imported one, even though it's the same
+    # source function (verified: same __qualname__/__code__, different module identity).
+    # Comparing by name/qualname is therefore the correct check here, not object identity.
+    assert report.python_callable.__name__ == "check_maintenance_results"
 
-def test_maintenance_dag_has_a_daily_schedule():
+
+def test_check_maintenance_results_raises_when_any_table_task_failed():
+    from qc_lakehouse_maintenance import check_maintenance_results
+
+    class _FakeTI:
+        def __init__(self, task_id, state):
+            self.task_id = task_id
+            self.state = state
+
+    class _FakeDagRun:
+        def get_task_instances(self):
+            return [
+                _FakeTI("optimize_fct_orders", "success"),
+                _FakeTI("analyze_fct_orders", "failed"),
+                _FakeTI("vacuum_fct_orders", "upstream_failed"),
+                _FakeTI("maintenance_report", "running"),
+            ]
+
+    with pytest.raises(AirflowException, match="analyze_fct_orders"):
+        check_maintenance_results(dag_run=_FakeDagRun())
+
+
+def test_check_maintenance_results_passes_when_all_table_tasks_succeeded():
+    from qc_lakehouse_maintenance import check_maintenance_results
+
+    class _FakeTI:
+        def __init__(self, task_id, state):
+            self.task_id = task_id
+            self.state = state
+
+    class _FakeDagRun:
+        def get_task_instances(self):
+            return [
+                _FakeTI("optimize_fct_orders", "success"),
+                _FakeTI("vacuum_fct_orders", "success"),
+                _FakeTI("maintenance_report", "running"),
+            ]
+
+    check_maintenance_results(dag_run=_FakeDagRun())  # must not raise
+
+
+def test_maintenance_dag_has_a_weekly_schedule():
     dagbag = _dagbag()
     dag = dagbag.get_dag("qc_lakehouse_maintenance")
-    assert dag.schedule == "@daily"
+    assert dag.schedule == "@weekly"
     assert dag.timetable.can_be_scheduled is True
 
 
@@ -199,6 +265,10 @@ def test_maintenance_dag_job_names_and_table_params_match_databricks_yml():
     for job_name in expected_job_names:
         assert job_name in jobs, f"{job_name} is missing from databricks.yml's resources.jobs"
         assert jobs[job_name]["name"] == job_name
+        # Design decision A: these 3 jobs stay serialized (max_concurrent_runs: 1),
+        # explicitly documented rather than left as an implicit default - the DAG's 7-table
+        # fan-out is an orchestration-shape decision, not a wall-clock-parallelism guarantee.
+        assert jobs[job_name].get("max_concurrent_runs") == 1
 
     for table in GOLD_TABLES:
         for operation in OPERATIONS:

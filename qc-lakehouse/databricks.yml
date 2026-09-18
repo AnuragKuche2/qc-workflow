@@ -173,6 +173,10 @@ resources:
     # itself needed no change since it already just scans sys.argv for `--operation`.
     optimize_gold_table:
       name: optimize_gold_table
+      # Deliberate design choice, not an accidental default: keeps the 7 per-table Airflow
+      # chains' concurrent runs of this same job serialized, since Databricks itself
+      # serializes same-job concurrent runs by design here anyway.
+      max_concurrent_runs: 1
       tasks:
         - task_key: main
           spark_python_task:
@@ -189,6 +193,10 @@ resources:
 
     analyze_gold_table:
       name: analyze_gold_table
+      # Deliberate design choice, not an accidental default: keeps the 7 per-table Airflow
+      # chains' concurrent runs of this same job serialized, since Databricks itself
+      # serializes same-job concurrent runs by design here anyway.
+      max_concurrent_runs: 1
       tasks:
         - task_key: main
           spark_python_task:
@@ -205,6 +213,10 @@ resources:
 
     vacuum_gold_table:
       name: vacuum_gold_table
+      # Deliberate design choice, not an accidental default: keeps the 7 per-table Airflow
+      # chains' concurrent runs of this same job serialized, since Databricks itself
+      # serializes same-job concurrent runs by design here anyway.
+      max_concurrent_runs: 1
       tasks:
         - task_key: main
           spark_python_task:
