@@ -12,13 +12,21 @@ Runs via serverless Spark (build_databricks_session), never the SQL warehouse - 
 benchmark queries (Task 3) are what actually need system.query.history, which only tracks
 warehouse-executed queries; this script's plain writes don't need that signal.
 
-HISTORY (live run of 2026-09-15): the checkpoint fired early - not via the should_bail_out
-slow-chunk threshold, but via a hard Databricks Connect session error mid-run (see
-_run_chunks's docstring) - after 2 of the planned 18 chunks landed (73,723,047 rows,
-~51.7x baseline). That run used a single continuous session for all 18 chunks; this script
-now supports resuming across several independent, short-lived sessions instead (see
-BENCH_DAY_OFFSET/BENCH_WINDOW_DAYS below), so a session-duration limit no longer caps the
-achievable total scale - it only caps how much one invocation can add at a time.
+HISTORY (live run of 2026-09-15 through 2026-09-17): the initial 2026-09-15 attempt hit a
+hard Databricks Connect session error after 2 of 18 chunks (73,723,047 rows, ~51.7x baseline).
+The resumable-generation capability added in Task 3 was then used to extend this via 8 further
+independent Databricks Job invocations (day_offset 10, 20, 30, 40, 50, 60, 70, 80 via
+`databricks bundle run generate_benchmark_orders -- --day-offset N --window-days 10`), each
+covering its own non-overlapping 10-day slice of the 90-day window and its own reserved
+id block (offset * 10,000,000). All 9 invocations (including the initial offset-0 baseline)
+succeeded with TERMINATED SUCCESS; the full 90-day window (2026-06-01 through 2026-08-30,
+exclusive end) was fully reached and generated. Final totals: 799,389,745 rows cumulative
+(~561x baseline; per-invocation counts: 73.7M, 96.7M, 85.3M, 90.4M, 92.0M, 84.6M, 97.8M,
+82.3M, 96.7M for offsets 0, 10, 20, 30, 40, 50, 60, 70, 80 respectively). Zero ID collisions
+verified two ways: (1) after each invocation, cumulative total_rows == distinct order_id
+count; (2) final per-block GROUP BY (order_id DIV 100_000_000) check: exactly 9 blocks,
+each with row count matching its invocation, each block's [min_id, max_id] strictly
+non-overlapping with all others.
 
 Each invocation covers a `BENCH_WINDOW_DAYS`-day slice starting `BENCH_DAY_OFFSET` days into
 the overall SCALE_MULTIPLIER/config.days target window, and appends to whatever earlier
