@@ -9,7 +9,7 @@ from airflow.exceptions import AirflowException
 DAGS_DIR = Path(__file__).resolve().parents[1] / "dags"
 sys.path.insert(0, str(DAGS_DIR))
 
-from maintenance import (  # noqa: E402
+from maintenance import (
     GOLD_TABLES,
     JOB_NAMES,
     OPERATIONS,
@@ -62,6 +62,7 @@ def test_build_maintenance_tasks_chains_optimize_then_analyze_then_vacuum():
     vacuum = dag.get_task("maintenance.vacuum")
     assert optimize.downstream_task_ids == {"maintenance.analyze"}
     assert analyze.downstream_task_ids == {"maintenance.vacuum"}
+    assert vacuum.downstream_task_ids == set()
     assert final_task.task_id == "maintenance.vacuum"
 
 
