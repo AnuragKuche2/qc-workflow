@@ -109,3 +109,20 @@ def test_check_maintenance_results_passes_when_everything_succeeded():
             }
 
     check_maintenance_results(ti=_FakeTI(), dag_run=_FakeDagRun())  # must not raise
+
+
+def test_check_maintenance_results_fails_closed_when_run_id_is_missing_from_the_response():
+    # Guards against a future Airflow version changing get_task_states' top-level keying:
+    # an unguarded .get(run_id, {}) would silently see zero failed tasks and report success
+    # on a response shape it no longer understands - the exact class of undocumented-
+    # contract drift that caused the bug this function was fixed for.
+    class _FakeDagRun:
+        dag_id = "qc_lakehouse_pipeline"
+        run_id = "manual__test"
+
+    class _FakeTI:
+        def get_task_states(self, dag_id, run_ids):
+            return {"some_other_run_id": {"report": "running"}}
+
+    with pytest.raises(AirflowException, match=r"no entry for this run"):
+        check_maintenance_results(ti=_FakeTI(), dag_run=_FakeDagRun())

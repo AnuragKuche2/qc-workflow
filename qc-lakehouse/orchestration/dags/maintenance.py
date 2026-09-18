@@ -94,7 +94,18 @@ def check_maintenance_results(**context) -> None:
     ti = context["ti"]
     dag_run = context["dag_run"]
     task_states = ti.get_task_states(dag_id=dag_run.dag_id, run_ids=[dag_run.run_id])
-    states_for_this_run = task_states.get(dag_run.run_id, {})
+    # Fail closed, not open: if a future Airflow version changes get_task_states' top-level
+    # keying, an unguarded .get(..., {}) would silently see zero failed tasks and report
+    # success - exactly the kind of undocumented-contract drift that caused the bug this
+    # function was fixed for. report's own task instance is always present in its own run's
+    # response, so a missing key here means the response shape itself is unrecognized.
+    if dag_run.run_id not in task_states:
+        raise AirflowException(
+            f"Pipeline failed at: get_task_states returned no entry for this run "
+            f"({dag_run.run_id!r}) - failing closed rather than treating an unrecognized "
+            f"response shape as success"
+        )
+    states_for_this_run = task_states[dag_run.run_id]
     failed = [
         task_key for task_key, state in states_for_this_run.items()
         if state == "failed" and task_key != "report"
