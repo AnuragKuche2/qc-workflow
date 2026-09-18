@@ -1,8 +1,10 @@
+import sys
 from pathlib import Path
 
 import pytest
 
 DAGS_DIR = Path(__file__).resolve().parents[1] / "dags"
+sys.path.insert(0, str(DAGS_DIR))
 BUNDLE_PATH = Path(__file__).resolve().parents[2] / "databricks.yml"
 
 
@@ -113,41 +115,77 @@ def test_maintenance_dag_imports_without_errors():
     assert dagbag.get_dag("qc_lakehouse_maintenance") is not None
 
 
-def test_maintenance_dag_has_exactly_three_tasks():
+GOLD_TABLES = (
+    "fct_orders", "fct_deliveries", "dim_customer", "dim_restaurant",
+    "dim_rider", "dim_zone", "dim_date",
+)
+OPERATIONS = ("optimize", "analyze", "vacuum")
+
+
+def test_maintenance_dag_has_one_chain_per_table_plus_a_report_task():
     dagbag = _dagbag()
     dag = dagbag.get_dag("qc_lakehouse_maintenance")
     assert dag is not None
-    assert set(dag.task_ids) == {"optimize_fct_orders", "analyze_fct_orders", "vacuum_fct_orders"}
+    expected_task_ids = {
+        f"{operation}_{table}" for table in GOLD_TABLES for operation in OPERATIONS
+    }
+    expected_task_ids.add("maintenance_report")
+    assert set(dag.task_ids) == expected_task_ids
 
 
-def test_maintenance_dag_dependency_chain_is_sequential():
+def test_maintenance_dag_each_table_chain_is_sequential_and_independent():
     dagbag = _dagbag()
     dag = dagbag.get_dag("qc_lakehouse_maintenance")
-    optimize = dag.get_task("optimize_fct_orders")
-    analyze = dag.get_task("analyze_fct_orders")
-    vacuum = dag.get_task("vacuum_fct_orders")
-    assert optimize.downstream_task_ids == {"analyze_fct_orders"}
-    assert analyze.downstream_task_ids == {"vacuum_fct_orders"}
-    assert vacuum.downstream_task_ids == set()
+    for table in GOLD_TABLES:
+        optimize = dag.get_task(f"optimize_{table}")
+        analyze = dag.get_task(f"analyze_{table}")
+        vacuum = dag.get_task(f"vacuum_{table}")
+        assert optimize.downstream_task_ids == {f"analyze_{table}"}
+        assert analyze.downstream_task_ids == {f"vacuum_{table}"}
+        assert vacuum.downstream_task_ids == {"maintenance_report"}
+        # Independent of every other table's chain - optimize_fct_orders must not depend on
+        # or block dim_customer's chain, proving these run in parallel, not sequentially.
+        assert optimize.upstream_task_ids == set()
 
 
-def test_maintenance_dag_has_no_schedule():
-    # NOTE: adapted from the brief's draft, same reasoning as test_pipeline_dag_has_no_schedule
-    # above - Airflow 3.3.1 removed `DAG.schedule_interval` and `Timetable.summary` (present in
-    # the 2.x-era draft) in favor of `DAG.schedule` and `Timetable.can_be_scheduled`.
+def test_maintenance_dag_report_task_fans_in_from_every_chain_with_all_done():
     dagbag = _dagbag()
     dag = dagbag.get_dag("qc_lakehouse_maintenance")
-    assert dag.schedule is None
-    assert dag.timetable.can_be_scheduled is False
+    report = dag.get_task("maintenance_report")
+    expected_upstream = {f"vacuum_{table}" for table in GOLD_TABLES}
+    assert report.upstream_task_ids == expected_upstream
+    assert report.trigger_rule == "all_done"
 
 
-def test_maintenance_dag_job_names_match_databricks_yml():
-    # Added per task-5 review (Important finding #3): the DAG's `job_name=` strings and
-    # databricks.yml's job `name:` keys are duplicated literals with no assertion tying them
-    # together - a rename in one file would only surface as an Airflow runtime failure
-    # (job-not-found), not a test failure. Parses databricks.yml directly (pyyaml is already
-    # a dev dependency) and cross-checks both the job_name values themselves and the mapping
-    # from DAG task_id -> job_name against the actual job resource keys/names declared there.
+def test_maintenance_dag_has_a_daily_schedule():
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_maintenance")
+    assert dag.schedule == "@daily"
+    assert dag.timetable.can_be_scheduled is True
+
+
+def test_maintenance_dag_every_task_has_the_alert_callback():
+    # NOTE: adapted from the brief's draft, same reasoning as the other Airflow-3.3.1
+    # adaptations in this file. Verified directly against
+    # airflow.sdk.bases.operator.BaseOperator.__init__: it always runs on_failure_callback
+    # through `_collect_from_input(...)` into a list (the class attribute is typed
+    # `Sequence[TaskStateChangeCallback] = ()`), even when a single bare callable is passed
+    # in (as it is here, via DEFAULT_ARGS). So the accessor is a one-item list, not the bare
+    # function, for every task in this DAG - not just some of them.
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_maintenance")
+    from alerting import alert_on_failure
+
+    for task_id in dag.task_ids:
+        task = dag.get_task(task_id)
+        assert task.on_failure_callback == [alert_on_failure]
+
+
+def test_maintenance_dag_job_names_and_table_params_match_databricks_yml():
+    # Extends the pre-existing job-name/databricks.yml cross-check (task-5 review, Important
+    # finding #3) to the renamed jobs, and adds a new assertion this redesign needs: every
+    # task's python_params must pass the correct --table for its own chain, not silently
+    # reuse the job's fct_orders default every time.
     import yaml
 
     dagbag = _dagbag()
@@ -157,26 +195,14 @@ def test_maintenance_dag_job_names_match_databricks_yml():
         bundle = yaml.safe_load(f)
     jobs = bundle["resources"]["jobs"]
 
-    expected_job_names = {"optimize_fct_orders", "analyze_fct_orders", "vacuum_fct_orders"}
-    # Every expected job must exist in databricks.yml, as its own resource key, with a
-    # matching `name:` field (the DatabricksRunNowOperator resolves job_name against the
-    # job's `name:`, not the bundle resource key - they happen to be identical by convention
-    # in this file, but this test pins that convention rather than assuming it).
+    expected_job_names = {"optimize_gold_table", "analyze_gold_table", "vacuum_gold_table"}
     for job_name in expected_job_names:
         assert job_name in jobs, f"{job_name} is missing from databricks.yml's resources.jobs"
-        assert jobs[job_name]["name"] == job_name, (
-            f"databricks.yml job resource {job_name!r} has name: {jobs[job_name]['name']!r}, "
-            f"expected {job_name!r}"
-        )
+        assert jobs[job_name]["name"] == job_name
 
-    # Every DAG task's job_name must point at one of those same, real job names.
-    for task_id in dag.task_ids:
-        task = dag.get_task(task_id)
-        assert task.job_name in expected_job_names, (
-            f"DAG task {task_id!r} has job_name={task.job_name!r}, not one of the 3 "
-            f"maintenance jobs declared in databricks.yml ({expected_job_names})"
-        )
-        assert task.job_name in jobs, (
-            f"DAG task {task_id!r} references job_name={task.job_name!r}, which does not "
-            "exist as a resource key in databricks.yml"
-        )
+    for table in GOLD_TABLES:
+        for operation in OPERATIONS:
+            task = dag.get_task(f"{operation}_{table}")
+            assert task.job_name == f"{operation}_gold_table"
+            assert task.job_name in jobs
+            assert task.python_params == ["--operation", operation, "--table", table]
