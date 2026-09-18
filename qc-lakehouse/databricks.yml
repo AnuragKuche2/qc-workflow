@@ -171,13 +171,13 @@ resources:
     # (jobs.SparkPythonTask): the actual CLI-args field is `spark_python_task.parameters`,
     # a plain list of strings passed directly to the Python file. Fixed here; run_maintenance.py
     # itself needed no change since it already just scans sys.argv for `--operation`.
-    optimize_fct_orders:
-      name: optimize_fct_orders
+    optimize_gold_table:
+      name: optimize_gold_table
       tasks:
         - task_key: main
           spark_python_task:
             python_file: ./perf_lab/run_maintenance.py
-            parameters: ["--operation", "optimize"]
+            parameters: ["--operation", "optimize", "--table", "fct_orders"]
           environment_key: qc_lakehouse_env
       environments:
         - environment_key: qc_lakehouse_env
@@ -187,13 +187,13 @@ resources:
               - ./dist/*.whl
               - python-dotenv
 
-    analyze_fct_orders:
-      name: analyze_fct_orders
+    analyze_gold_table:
+      name: analyze_gold_table
       tasks:
         - task_key: main
           spark_python_task:
             python_file: ./perf_lab/run_maintenance.py
-            parameters: ["--operation", "analyze"]
+            parameters: ["--operation", "analyze", "--table", "fct_orders"]
           environment_key: qc_lakehouse_env
       environments:
         - environment_key: qc_lakehouse_env
@@ -203,13 +203,13 @@ resources:
               - ./dist/*.whl
               - python-dotenv
 
-    vacuum_fct_orders:
-      name: vacuum_fct_orders
+    vacuum_gold_table:
+      name: vacuum_gold_table
       tasks:
         - task_key: main
           spark_python_task:
             python_file: ./perf_lab/run_maintenance.py
-            parameters: ["--operation", "vacuum"]
+            parameters: ["--operation", "vacuum", "--table", "fct_orders"]
           environment_key: qc_lakehouse_env
       environments:
         - environment_key: qc_lakehouse_env
