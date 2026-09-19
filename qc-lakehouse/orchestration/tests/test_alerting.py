@@ -1,14 +1,27 @@
 # qc-lakehouse/orchestration/tests/test_alerting.py
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dags"))
 
 from alerting import (
+    _execute_statement,
     build_create_schema_statement,
     build_create_table_statement,
     build_insert_statement,
 )
+
+
+def _fake_response(status_code=200, json_body=None):
+    response = MagicMock()
+    response.status_code = status_code
+    response.json.return_value = json_body or {}
+    response.text = str(json_body)
+    response.raise_for_status.return_value = None
+    return response
 
 
 def test_build_create_schema_statement_targets_the_ops_schema():
@@ -87,3 +100,62 @@ def test_build_insert_statement_does_not_escape_the_exception_value():
     )
     by_name = {p["name"]: p for p in parameters}
     assert by_name["exception_str"]["value"] == "it's broken"
+
+
+def test_execute_statement_succeeds_immediately_without_polling():
+    post_response = _fake_response(json_body={"status": {"state": "SUCCEEDED"}})
+    with patch("alerting.requests.post", return_value=post_response) as mock_post, \
+         patch("alerting.requests.get") as mock_get:
+        _execute_statement("host", "token", "SELECT 1")
+    mock_post.assert_called_once()
+    mock_get.assert_not_called()
+
+
+def test_execute_statement_polls_through_pending_to_success_on_a_cold_warehouse():
+    # PENDING/RUNNING on the initial response are normal for a cold/starting serverless SQL
+    # warehouse, not failures - the statement should be polled, not rejected outright.
+    post_response = _fake_response(
+        json_body={"status": {"state": "PENDING"}, "statement_id": "abc123"},
+    )
+    poll_running = _fake_response(json_body={"status": {"state": "RUNNING"}})
+    poll_succeeded = _fake_response(json_body={"status": {"state": "SUCCEEDED"}})
+
+    with patch("alerting.requests.post", return_value=post_response), \
+         patch("alerting.requests.get", side_effect=[poll_running, poll_succeeded]) as mock_get, \
+         patch("alerting.time.sleep") as mock_sleep:
+        _execute_statement("host", "token", "SELECT 1")
+
+    assert mock_get.call_count == 2
+    mock_get.assert_called_with(
+        "https://host/api/2.0/sql/statements/abc123",
+        headers={"Authorization": "Bearer token"},
+        timeout=15,
+    )
+    mock_sleep.assert_called()
+
+
+def test_execute_statement_raises_on_a_genuine_terminal_failure_after_polling():
+    post_response = _fake_response(
+        json_body={"status": {"state": "RUNNING"}, "statement_id": "abc123"},
+    )
+    poll_failed = _fake_response(json_body={"status": {"state": "FAILED", "error": "boom"}})
+
+    with patch("alerting.requests.post", return_value=post_response), \
+         patch("alerting.requests.get", return_value=poll_failed), \
+         patch("alerting.time.sleep"), pytest.raises(RuntimeError, match="FAILED"):
+        _execute_statement("host", "token", "SELECT 1")
+
+
+def test_execute_statement_raises_if_still_not_terminal_after_the_poll_budget():
+    post_response = _fake_response(
+        json_body={"status": {"state": "PENDING"}, "statement_id": "abc123"},
+    )
+    still_pending = _fake_response(json_body={"status": {"state": "PENDING"}})
+
+    with patch("alerting.requests.post", return_value=post_response), \
+         patch("alerting.requests.get", return_value=still_pending) as mock_get, \
+         patch("alerting.time.sleep"), pytest.raises(RuntimeError, match="PENDING"):
+        _execute_statement("host", "token", "SELECT 1")
+
+    # Bounded, not an infinite/unbounded poll loop.
+    assert mock_get.call_count > 0

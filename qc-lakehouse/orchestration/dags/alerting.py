@@ -11,12 +11,22 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import requests
 from airflow.sdk.bases.hook import BaseHook
 
 DATABRICKS_CONN_ID = "databricks_default"
 WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "ca865a4ef1668613")
+
+# PENDING/RUNNING are normal, expected states while a serverless SQL warehouse is cold-
+# starting - not failures. Poll for up to POLL_BUDGET_SECONDS before giving up; a timeout
+# still only raises RuntimeError, which alert_on_failure's own try/except already catches
+# and logs, so a slow-to-start warehouse never masks the real task failure this callback
+# exists to report.
+POLL_INTERVAL_SECONDS = 2
+POLL_BUDGET_SECONDS = 30
+_TERMINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"}
 
 
 def build_create_schema_statement() -> str:
@@ -48,6 +58,30 @@ def build_insert_statement(
     return statement, parameters
 
 
+def _get_statement_status(host: str, token: str, statement_id: str) -> dict:
+    response = requests.get(
+        f"https://{host}/api/2.0/sql/statements/{statement_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _wait_for_terminal_state(host: str, token: str, statement_id: str, body: dict) -> dict:
+    """Polls until the statement reaches a terminal state or POLL_BUDGET_SECONDS elapses.
+    Returns the last-seen response body either way - a still-PENDING/RUNNING body after the
+    budget is reported by the caller as a timeout, not silently treated as success."""
+    state = body.get("status", {}).get("state")
+    elapsed = 0
+    while state not in _TERMINAL_STATES and elapsed < POLL_BUDGET_SECONDS:
+        time.sleep(POLL_INTERVAL_SECONDS)
+        elapsed += POLL_INTERVAL_SECONDS
+        body = _get_statement_status(host, token, statement_id)
+        state = body.get("status", {}).get("state")
+    return body
+
+
 def _execute_statement(
     host: str, token: str, statement: str, parameters: list[dict] | None = None,
 ) -> None:
@@ -67,9 +101,18 @@ def _execute_statement(
     # returns HTTP 200 with {"status": {"state": "FAILED", "error": {...}}} for SQL-level
     # errors (e.g. SCHEMA_NOT_FOUND), so that case must be checked explicitly or it's
     # silently swallowed.
-    state = response.json().get("status", {}).get("state")
+    body = response.json()
+    state = body.get("status", {}).get("state")
+
+    # A cold/starting serverless warehouse commonly returns PENDING/RUNNING from the initial
+    # `wait_timeout: 10s` request rather than a genuine failure - poll for the real outcome
+    # instead of rejecting it outright.
+    if state in ("PENDING", "RUNNING"):
+        body = _wait_for_terminal_state(host, token, body["statement_id"], body)
+        state = body.get("status", {}).get("state")
+
     if state != "SUCCEEDED":
-        raise RuntimeError(f"Statement did not succeed (state={state}): {response.text}")
+        raise RuntimeError(f"Statement did not succeed (state={state}): {body}")
 
 
 def alert_on_failure(context: dict) -> None:
