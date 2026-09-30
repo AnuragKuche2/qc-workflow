@@ -5,6 +5,7 @@ from perf_lab.generate_benchmark_orders import (
     _run_chunks,
     check_projected_orders_within_id_block,
     chunk_date_ranges,
+    chunk_writer_options,
     id_offset_for_day_offset,
     parse_args,
     resolve_window,
@@ -122,6 +123,19 @@ def test_run_chunks_appends_the_first_chunk_when_resuming():
         ("2026-06-21", "2026-06-26", "append"),
         ("2026-06-26", "2026-07-01", "append"),
     ]
+
+
+def test_chunk_writer_options_overwrites_the_whole_table_for_a_from_scratch_run():
+    assert chunk_writer_options("2026-06-01", "2026-06-06", "overwrite") == {
+        "overwriteSchema": "true"
+    }
+
+
+def test_chunk_writer_options_replaces_only_the_chunk_slice_when_resuming():
+    # Re-running a resumed invocation must replace its own chunk, not append a duplicate.
+    assert chunk_writer_options("2026-07-01", "2026-07-06", "append") == {
+        "replaceWhere": "date_day >= '2026-07-01' AND date_day < '2026-07-06'"
+    }
 
 
 def test_check_projected_orders_within_id_block_passes_when_comfortably_under():

@@ -47,9 +47,10 @@ real, non-cosmetic limitation of this windowed-resumable pattern worth knowing b
 for another generator.
 
 Each invocation covers a `BENCH_WINDOW_DAYS`-day slice starting `BENCH_DAY_OFFSET` days into
-the overall SCALE_MULTIPLIER/config.days target window, and appends to whatever earlier
-invocations already wrote (day_offset 0 is the only invocation allowed to overwrite, i.e. a
-genuine from-scratch run). order_id would otherwise collide across invocations - it's a
+the overall SCALE_MULTIPLIER/config.days target window, and adds to whatever earlier
+invocations already wrote by replacing only its own chunk date ranges, so re-running an
+invocation is idempotent (day_offset 0 is the only invocation allowed to overwrite the whole
+table, i.e. a genuine from-scratch run). order_id would otherwise collide across invocations - it's a
 contiguous integer computed fresh, starting near 1, by every independent build_orders_shell
 call, regardless of calendar date - so every invocation's order_id is shifted by
 id_offset_for_day_offset(BENCH_DAY_OFFSET), reserving a non-overlapping ID_BLOCK_SIZE-sized
@@ -205,6 +206,18 @@ def should_bail_out(chunk_elapsed_seconds: list[float], threshold: float = BAILO
     return latest > threshold * avg_prior
 
 
+def chunk_writer_options(chunk_start: str, chunk_end: str, write_mode: str) -> dict[str, str]:
+    """Delta writer options for one chunk, always used with `.mode("overwrite")`.
+
+    "overwrite" replaces the whole table (a from-scratch day_offset 0 run). "append" replaces
+    only this chunk's [chunk_start, chunk_end) date_day slice via replaceWhere, so re-running
+    a resumed invocation after a partial failure rewrites its own chunks instead of
+    duplicating their rows."""
+    if write_mode == "overwrite":
+        return {"overwriteSchema": "true"}
+    return {"replaceWhere": f"date_day >= '{chunk_start}' AND date_day < '{chunk_end}'"}
+
+
 def _scaled_config() -> GeneratorConfig:
     base = GeneratorConfig()
     return replace(base, orders_per_day=base.orders_per_day * SCALE_MULTIPLIER)
@@ -293,7 +306,8 @@ def main() -> None:
     # its own session-duration budget - instead of one long session attempting all 18 chunks
     # at once (Task 1's live run: a hard session error killed that after 2 of 18 chunks).
     # day_offset 0 is a from-scratch invocation (overwrite); any later offset is a resume
-    # (append) into the table an earlier invocation already started.
+    # into the table an earlier invocation already started, replacing only its own date
+    # slices (see chunk_writer_options) so a re-run never duplicates rows.
     day_offset, window_days = parse_args(sys.argv[1:])
     start_date, days = resolve_window(
         base_start_date=full_config.start_date,
@@ -355,8 +369,9 @@ def main() -> None:
         chunk_df = orders_df.filter(
             (F.col("date_day") >= F.lit(chunk_start)) & (F.col("date_day") < F.lit(chunk_end))
         )
-        (chunk_df.write.mode(write_mode).option("overwriteSchema", "true").saveAsTable(table)
-         if write_mode == "overwrite" else chunk_df.write.mode(write_mode).saveAsTable(table))
+        chunk_df.write.mode("overwrite").options(
+            **chunk_writer_options(chunk_start, chunk_end, write_mode)
+        ).saveAsTable(table)
         return chunk_df.count()
 
     chunks = chunk_date_ranges(config.start_date, config.days, CHUNK_DAYS)

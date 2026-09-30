@@ -202,10 +202,13 @@ resources:
       name: optimize_gold_table
       # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
       # fires up to 7 concurrent run-now calls against this one job (one per gold table).
-      # max_concurrent_runs: 1 serializes them Databricks-side - required because Free
-      # Edition caps concurrent job tasks at 5 account-wide, and a quota overrun shuts down
-      # all workspace compute for the day.
+      # max_concurrent_runs: 1 plus queueing serializes them Databricks-side - required
+      # because Free Edition caps concurrent job tasks at 5 account-wide, and a quota overrun
+      # shuts down all workspace compute for the day. Without queue.enabled, runs above the
+      # limit are SKIPPED instead of queued, and the operator fails them.
       max_concurrent_runs: 1
+      queue:
+        enabled: true
       tasks:
         - task_key: main
           spark_python_task:
@@ -224,10 +227,13 @@ resources:
       name: analyze_gold_table
       # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
       # fires up to 7 concurrent run-now calls against this one job (one per gold table).
-      # max_concurrent_runs: 1 serializes them Databricks-side - required because Free
-      # Edition caps concurrent job tasks at 5 account-wide, and a quota overrun shuts down
-      # all workspace compute for the day.
+      # max_concurrent_runs: 1 plus queueing serializes them Databricks-side - required
+      # because Free Edition caps concurrent job tasks at 5 account-wide, and a quota overrun
+      # shuts down all workspace compute for the day. Without queue.enabled, runs above the
+      # limit are SKIPPED instead of queued, and the operator fails them.
       max_concurrent_runs: 1
+      queue:
+        enabled: true
       tasks:
         - task_key: main
           spark_python_task:
@@ -246,10 +252,13 @@ resources:
       name: vacuum_gold_table
       # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
       # fires up to 7 concurrent run-now calls against this one job (one per gold table).
-      # max_concurrent_runs: 1 serializes them Databricks-side - required because Free
-      # Edition caps concurrent job tasks at 5 account-wide, and a quota overrun shuts down
-      # all workspace compute for the day.
+      # max_concurrent_runs: 1 plus queueing serializes them Databricks-side - required
+      # because Free Edition caps concurrent job tasks at 5 account-wide, and a quota overrun
+      # shuts down all workspace compute for the day. Without queue.enabled, runs above the
+      # limit are SKIPPED instead of queued, and the operator fails them.
       max_concurrent_runs: 1
+      queue:
+        enabled: true
       tasks:
         - task_key: main
           spark_python_task:

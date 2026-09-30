@@ -68,13 +68,13 @@ scripts, isolated from the real, deployed pipeline. Two of its scripts stopped b
 throwaway and became real, permanently-deployed Databricks Jobs that run against production
 data on a schedule:
 
-- `perf_lab/run_maintenance.py` - runs `OPTIMIZE`/`ANALYZE`/`VACUUM` on the real `fct_orders`
-  table, triggered by the real `qc_lakehouse_pipeline` Airflow DAG (part of the merged medallion DAG).
+- `perf_lab/run_maintenance.py` - runs `OPTIMIZE`/`ANALYZE`/`VACUUM` on all 7 real gold
+  tables (one table per job run), triggered by the real `qc_lakehouse_pipeline` Airflow DAG (part of the merged medallion DAG).
 - `perf_lab/apply_winning_layout.py` - applied the Liquid Clustering decision to the real
   `fct_orders` table.
 
-Both are wired into `databricks.yml` as real jobs (`optimize_fct_orders`, `analyze_fct_orders`,
-`vacuum_fct_orders`). The mismatch: the directory name and its original design intent still
+Both are wired into `databricks.yml` as real jobs (`optimize_gold_table`, `analyze_gold_table`,
+`vacuum_gold_table`). The mismatch: the directory name and its original design intent still
 say "throwaway lab work, safe to ignore or delete," but two of its files are load-bearing
 infrastructure. Someone skimming the repo would reasonably (and wrongly) assume nothing in
 `perf_lab/` matters in production.
