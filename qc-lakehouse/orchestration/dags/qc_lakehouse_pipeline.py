@@ -110,6 +110,7 @@ with DAG(
         task_id="report",
         python_callable=check_maintenance_results,
         trigger_rule="all_done",
+        retries=0,
     )
 
     final_maintenance_task = build_maintenance_tasks(dag)

@@ -1,3 +1,4 @@
+import shlex
 import sys
 from pathlib import Path
 
@@ -90,12 +91,20 @@ def test_pipeline_dag_every_task_has_the_alert_callback():
         assert task.on_failure_callback == [alert_on_failure]
 
 
-def test_all_tasks_have_retries_configured():
+def test_all_job_tasks_have_retries_configured():
     dagbag = _dagbag()
     dag = dagbag.get_dag("qc_lakehouse_pipeline")
     for task_id in dag.task_ids:
+        if task_id == "report":
+            continue
         task = dag.get_task(task_id)
         assert task.retries == 2
+
+
+def test_report_task_does_not_retry():
+    dagbag = _dagbag()
+    dag = dagbag.get_dag("qc_lakehouse_pipeline")
+    assert dag.get_task("report").retries == 0
 
 
 def test_dag_has_deadline_alert_configured():
@@ -157,8 +166,18 @@ def test_pipeline_dag_job_names_and_layer_selectors_match_databricks_yml():
         "dbt_build_test_staging", "dbt_build_test_intermediate", "dbt_build_test_marts",
     }
 
+    for layer in ("staging", "intermediate", "marts"):
+        dbt_tasks = [
+            task["dbt_task"] for task in jobs[f"dbt_build_test_{layer}"]["tasks"] if "dbt_task" in task
+        ]
+        assert len(dbt_tasks) == 1
+        commands = dbt_tasks[0]["commands"]
+        assert len(commands) == 1
+        assert shlex.split(commands[0])[:4] == ["dbt", "build", "--select", layer]
+
     for job_name in ("optimize_gold_table", "analyze_gold_table", "vacuum_gold_table"):
         assert jobs[job_name].get("max_concurrent_runs") == 1
+        assert jobs[job_name].get("queue") == {"enabled": True}
 
 
 def test_check_maintenance_results_raises_when_a_table_task_failed():

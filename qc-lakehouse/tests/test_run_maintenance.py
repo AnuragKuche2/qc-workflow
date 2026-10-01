@@ -4,8 +4,14 @@ import pytest
 from perf_lab.run_maintenance import GOLD_TABLES, parse_args
 
 
-def test_parse_args_defaults_table_to_fct_orders():
-    assert parse_args(["--operation", "optimize"]) == ("optimize", "fct_orders")
+def test_parse_args_requires_a_table():
+    with pytest.raises(ValueError, match="--table"):
+        parse_args(["--operation", "optimize"])
+
+
+def test_parse_args_rejects_an_unknown_flag():
+    with pytest.raises(ValueError, match="unrecognized argument '--tabel'"):
+        parse_args(["--operation", "optimize", "--tabel", "dim_zone"])
 
 
 def test_parse_args_reads_an_explicit_table():
@@ -26,7 +32,7 @@ def test_parse_args_requires_a_valid_operation():
     with pytest.raises(ValueError, match="--operation"):
         parse_args(["--table", "fct_orders"])
     with pytest.raises(ValueError, match="--operation"):
-        parse_args(["--operation", "not-a-real-operation"])
+        parse_args(["--operation", "not-a-real-operation", "--table", "fct_orders"])
 
 
 def test_parse_args_rejects_an_unknown_table():

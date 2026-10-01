@@ -42,7 +42,7 @@ def parse_args(argv: list[str]) -> str:
             layout = argv[i + 1]
             i += 2
         else:
-            i += 1
+            raise ValueError(f"apply-layouts: unrecognized argument {argv[i]!r} - expected --layout.")
     if layout is None:
         raise ValueError(f"--layout is required, one of {LAYOUTS}")
     if layout not in LAYOUTS:

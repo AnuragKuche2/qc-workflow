@@ -26,7 +26,6 @@ GOLD_TABLES = (
     "fct_orders", "fct_deliveries", "dim_customer", "dim_restaurant",
     "dim_rider", "dim_zone", "dim_date",
 )
-DEFAULT_TABLE = "fct_orders"
 
 OPERATION_TEMPLATES = {
     "optimize": "OPTIMIZE {table}",
@@ -37,12 +36,12 @@ OPERATION_TEMPLATES = {
 
 def parse_args(argv: list[str]) -> tuple[str, str]:
     """(operation, table_short_name) from `--operation X --table Y` CLI flags (either order).
-    --operation is required (no valid default - a bare invocation must fail loudly, not
-    silently no-op). --table defaults to DEFAULT_TABLE, preserving the 3 renamed Databricks
-    Jobs' existing default parameters (which only pass --operation) as still valid,
-    backward-compatible invocations against fct_orders."""
+    Both flags are required and any unrecognized token raises: a missing or misspelled
+    --table (e.g. --tabel) must fail loudly rather than silently maintaining the wrong table.
+    Every caller passes both - the DAG's mapped python_params and the 3 gold-table Jobs'
+    default parameters in databricks.yml."""
     operation = None
-    table = DEFAULT_TABLE
+    table = None
     i = 0
     while i < len(argv):
         if argv[i] == "--operation":
@@ -52,7 +51,10 @@ def parse_args(argv: list[str]) -> tuple[str, str]:
             table = argv[i + 1]
             i += 2
         else:
-            i += 1
+            raise ValueError(
+                f"run-maintenance: unrecognized argument {argv[i]!r} - expected --operation "
+                "and --table."
+            )
     if operation not in OPERATION_TEMPLATES:
         raise ValueError(f"--operation must be one of {list(OPERATION_TEMPLATES)}, got {operation!r}")
     if table not in GOLD_TABLES:

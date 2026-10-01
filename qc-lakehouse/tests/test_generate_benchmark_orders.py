@@ -143,7 +143,7 @@ def test_check_projected_orders_within_id_block_passes_when_comfortably_under():
     check_projected_orders_within_id_block(50_000_000, window_days=10, id_block_size=10_000_000)
 
 
-def test_check_projected_orders_within_id_block_raises_at_the_observed_worst_case_margin():
+def test_check_projected_orders_within_id_block_passes_at_the_observed_worst_case_margin():
     # Mirrors the live-verified day_offset=60 worst case: 97,752,042 projected orders against
     # a 100,000,000-id reserved block is only a 2.2% margin - still technically under, so this
     # must NOT raise here, but confirms the boundary is where the review found it.
