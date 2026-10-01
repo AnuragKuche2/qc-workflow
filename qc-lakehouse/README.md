@@ -251,7 +251,8 @@ hit this), re-run the same connection setup with a fresh token rather than debug
 `403 Invalid Token` failure as something else.
 
 The DAG runs on an `@weekly` schedule and is also manually triggerable the same way as above.
-Each task has 2 retries with a 2-minute delay, and the DAG has a logged deadline-miss warning
+Each task has 2 retries with a 2-minute delay (except `report`, which has none - its check is
+deterministic once upstream tasks finish), and the DAG has a logged deadline-miss warning
 (Airflow 3's replacement for the removed SLA feature - no live alerting channel exists for this
 portfolio project, so the callback logs what a production system would page on). The deadline
 uses `DeadlineReference.DAGRUN_QUEUED_AT`, not `DAGRUN_LOGICAL_DATE` - a manually-triggered run
