@@ -12,9 +12,11 @@ be split across the 4 layouts compared here - see render_cost_section's own outp
 full caveat. Bytes-scanned (from system.query.history, captured per query by
 run_benchmark_queries.py) remains the per-layout decision signal for exactly that reason.
 
-qc_dev.perf_bench is intentionally dropped after Sub-project H's Task 6 cleanup - running this
-script again requires first re-running Tasks 1-2 (generate_benchmark_orders.py then
-apply_layouts.py) to recreate it."""
+qc_dev.perf_bench currently still holds this benchmark's data (it was not dropped after Sub-
+project H's layout was applied to fct_orders - see the README's Sub-project H section for the
+current state); whether to drop it is a separate decision, not assumed here. If it ever is
+dropped, running this script again requires first re-running Tasks 1-2
+(generate_benchmark_orders.py then apply_layouts.py) to recreate it."""
 from __future__ import annotations
 
 import sys
@@ -32,6 +34,10 @@ from qc_lakehouse.databricks_session import is_running_on_databricks
 CATALOG, SCHEMA = "qc_dev", "perf_bench"
 REPORTS_DIR = Path(__file__).resolve().parents[2] / "docs" / "superpowers" / "reports"
 
+# Matches generate_benchmark_orders.py's own baseline order count (measured 2026-09-15), so
+# both scripts report the same multiplier for the same row count.
+BASELINE_ORDER_COUNT = 1_424_757
+
 # benchmark_results has no timestamp column (see run_benchmark_queries.py), so the cost window
 # can't be read back from the benchmark data itself. Instead this looks back from "now" (report
 # generation time) far enough to cover a normal H run: Task 3's 16 benchmark statements plus its
@@ -39,6 +45,29 @@ REPORTS_DIR = Path(__file__).resolve().parents[2] / "docs" / "superpowers" / "re
 # Live observation of the original run showed the whole thing fit inside a 2-hour window: widen
 # this constant if a future re-run's benchmark+report cycle runs longer than that.
 COST_LOOKBACK_HOURS = 2
+
+
+def build_scale_note(actual_rows: int, baseline_order_count: int = BASELINE_ORDER_COUNT) -> str:
+    """The `Benchmark scale: ...` line for the report header, computed fresh from `actual_rows`
+    (a live count against orders_bench_baseline, the layout-comparison table the results above
+    are actually measured against) rather than a hardcoded scale/target claim.
+
+    A previous version of this hardcoded a "~51.7x baseline; the 500x target was not reached"
+    string here - regenerating the report would silently revert any later manual correction to
+    that claim. This also states explicitly that orders_bench_baseline (measured here) and
+    orders_bench (the raw generation source table, extended separately and possibly to a
+    different scale via generate_benchmark_orders.py's resumable windowed runs) can now be at
+    different scales - see that script's own module docstring for orders_bench's current row
+    count."""
+    actual_scale = actual_rows / baseline_order_count
+    return (
+        f"{actual_rows:,} rows in orders_bench_baseline (~{actual_scale:.1f}x baseline) - this "
+        "is the layout-comparison table the results below are measured against; it has not "
+        "been rebuilt since. The separate orders_bench table (raw generation output, not used "
+        "for these layout comparisons) may since have grown to a different scale via "
+        "perf_lab/generate_benchmark_orders.py's resumable windowed runs - see that script's "
+        "own module docstring for its current row count."
+    )
 
 
 def summarize_by_layout(rows: list[dict]) -> dict[str, dict]:
@@ -277,7 +306,7 @@ def main() -> None:
         wait_timeout="30s",
     )
     actual_rows = int(scale_row_count.result.data_array[0][0])
-    scale_note = f"{actual_rows:,} rows (~51.7x baseline; the 500x target was not reached - see README)"
+    scale_note = build_scale_note(actual_rows)
 
     window_end = datetime.now(UTC)
     window_start = window_end - timedelta(hours=COST_LOOKBACK_HOURS)

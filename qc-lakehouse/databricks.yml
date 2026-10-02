@@ -10,7 +10,8 @@ artifacts:
 variables:
   warehouse_id:
     description: >-
-      SQL warehouse ID used by the dbt_run/dbt_test jobs. Databricks UI: SQL Warehouses ->
+      SQL warehouse ID used by the dbt Databricks Jobs (dbt_build_test_staging,
+      dbt_build_test_intermediate, dbt_build_test_marts). Databricks UI: SQL Warehouses ->
       your warehouse -> Connection details -> HTTP Path (the ID is the trailing path segment).
       Override via `databricks bundle deploy --var="warehouse_id=..."` for a different workspace.
     default: ca865a4ef1668613
@@ -47,18 +48,59 @@ resources:
               - ./dist/*.whl
               - python-dotenv
 
-    dbt_run:
-      name: dbt_run
+    generate_benchmark_orders:
+      name: generate_benchmark_orders
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/generate_benchmark_orders.py
+            # day_offset=90 is intentionally out of range (the full window is 90 days total) -
+            # resolve_window already raises a clear ValueError once day_offset >= total_days,
+            # so an accidental unparameterized "Run now"/retry fails fast instead of silently
+            # re-appending duplicate order_ids into an already-populated table. Always override
+            # both flags explicitly for a real invocation.
+            parameters: ["--day-offset", "90", "--window-days", "10"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    apply_layouts:
+      name: apply_layouts
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ./perf_lab/apply_layouts.py
+            # One layout per run - the original single-session, all-4-layouts script hit the
+            # same INVALID_HANDLE.OPERATION_ABANDONED session-duration failure
+            # generate_benchmark_orders.py hit at the 799M-row (561x) benchmark scale. Always
+            # override --layout explicitly (baseline/partitioned/zorder/liquid).
+            parameters: ["--layout", "baseline"]
+          environment_key: qc_lakehouse_env
+      environments:
+        - environment_key: qc_lakehouse_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+              - python-dotenv
+
+    dbt_build_test_staging:
+      name: dbt_build_test_staging
       tasks:
         # dbt_task has no field to reference a Databricks secret directly, and
         # {{secrets/scope/key}} is not resolved inside dbt_task commands (confirmed live - see
-        # scripts/resolve_pii_salt.py's docstring and the task-4 report). This task bridges
-        # dbutils.secrets.get -> a task value the dbt_task below can reference via --vars.
+        # scripts/resolve_pii_salt.py's docstring). This task bridges dbutils.secrets.get -> a
+        # task value the dbt_task below can reference via --vars.
         # CAVEAT: the resolved value is NOT protected end-to-end - the dbt_task below echoes
         # its own resolved shell command (including the substituted value) into its run
         # output/logs in plaintext, visible to anyone with read/API access to that job run.
         # Known, accepted limitation for this single-user Free Edition workspace - see
-        # scripts/resolve_pii_salt.py and the task-4 report for details.
+        # scripts/resolve_pii_salt.py for details.
         - task_key: resolve_secrets
           spark_python_task:
             python_file: ./scripts/resolve_pii_salt.py
@@ -69,7 +111,7 @@ resources:
           dbt_task:
             project_directory: ./dbt/qc_lakehouse
             commands:
-              - "dbt run --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
+              - "dbt build --select staging --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
             warehouse_id: ${var.warehouse_id}
             catalog: qc_dev
             schema: silver
@@ -84,17 +126,13 @@ resources:
             dependencies:
               - dbt-databricks>=1.12.5
 
-    dbt_test:
-      name: dbt_test
+    dbt_build_test_intermediate:
+      name: dbt_build_test_intermediate
       tasks:
-        # Same bridging task as dbt_run's - duplicated rather than shared because task values
-        # only propagate within one job run's own task DAG, and dbt_run/dbt_test are separate
-        # top-level jobs (Task 5's Airflow DAG triggers them independently).
-        # CAVEAT: the resolved value is NOT protected end-to-end - the dbt_task below echoes
-        # its own resolved shell command (including the substituted value) into its run
-        # output/logs in plaintext, visible to anyone with read/API access to that job run.
-        # Known, accepted limitation for this single-user Free Edition workspace - see
-        # scripts/resolve_pii_salt.py and the task-4 report for details.
+        # Same bridging task as dbt_build_test_staging's - duplicated rather than shared
+        # because task values only propagate within one job run's own task DAG, and these are
+        # separate top-level jobs (the pipeline DAG triggers them independently in sequence).
+        # Same plaintext-in-logs CAVEAT as dbt_build_test_staging - see that job's comment.
         - task_key: resolve_secrets
           spark_python_task:
             python_file: ./scripts/resolve_pii_salt.py
@@ -105,7 +143,37 @@ resources:
           dbt_task:
             project_directory: ./dbt/qc_lakehouse
             commands:
-              - "dbt test --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
+              - "dbt build --select intermediate --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
+            warehouse_id: ${var.warehouse_id}
+            catalog: qc_dev
+            schema: silver
+          environment_key: qc_lakehouse_dbt_env
+      environments:
+        - environment_key: qc_lakehouse_secrets_env
+          spec:
+            environment_version: "3"
+        - environment_key: qc_lakehouse_dbt_env
+          spec:
+            environment_version: "3"
+            dependencies:
+              - dbt-databricks>=1.12.5
+
+    dbt_build_test_marts:
+      name: dbt_build_test_marts
+      tasks:
+        # Same bridging task as dbt_build_test_staging's - see that job's comments for the
+        # duplication rationale and the plaintext-in-logs CAVEAT.
+        - task_key: resolve_secrets
+          spark_python_task:
+            python_file: ./scripts/resolve_pii_salt.py
+          environment_key: qc_lakehouse_secrets_env
+        - task_key: main
+          depends_on:
+            - task_key: resolve_secrets
+          dbt_task:
+            project_directory: ./dbt/qc_lakehouse
+            commands:
+              - "dbt build --select marts --vars '{\"pii_hash_salt\": \"{{tasks.resolve_secrets.values.pii_hash_salt}}\"}'"
             warehouse_id: ${var.warehouse_id}
             catalog: qc_dev
             schema: silver
@@ -130,13 +198,22 @@ resources:
     # (jobs.SparkPythonTask): the actual CLI-args field is `spark_python_task.parameters`,
     # a plain list of strings passed directly to the Python file. Fixed here; run_maintenance.py
     # itself needed no change since it already just scans sys.argv for `--operation`.
-    optimize_fct_orders:
-      name: optimize_fct_orders
+    optimize_gold_table:
+      name: optimize_gold_table
+      # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
+      # fires up to 7 concurrent run-now calls against this one job (one per gold table).
+      # max_concurrent_runs: 1 plus queueing serializes them Databricks-side - required
+      # because Free Edition caps concurrent job tasks at 5 account-wide, and a quota overrun
+      # shuts down all workspace compute for the day. Without queue.enabled, runs above the
+      # limit are SKIPPED instead of queued, and the operator fails them.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
       tasks:
         - task_key: main
           spark_python_task:
             python_file: ./perf_lab/run_maintenance.py
-            parameters: ["--operation", "optimize"]
+            parameters: ["--operation", "optimize", "--table", "fct_orders"]
           environment_key: qc_lakehouse_env
       environments:
         - environment_key: qc_lakehouse_env
@@ -146,13 +223,22 @@ resources:
               - ./dist/*.whl
               - python-dotenv
 
-    analyze_fct_orders:
-      name: analyze_fct_orders
+    analyze_gold_table:
+      name: analyze_gold_table
+      # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
+      # fires up to 7 concurrent run-now calls against this one job (one per gold table).
+      # max_concurrent_runs: 1 plus queueing serializes them Databricks-side - required
+      # because Free Edition caps concurrent job tasks at 5 account-wide, and a quota overrun
+      # shuts down all workspace compute for the day. Without queue.enabled, runs above the
+      # limit are SKIPPED instead of queued, and the operator fails them.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
       tasks:
         - task_key: main
           spark_python_task:
             python_file: ./perf_lab/run_maintenance.py
-            parameters: ["--operation", "analyze"]
+            parameters: ["--operation", "analyze", "--table", "fct_orders"]
           environment_key: qc_lakehouse_env
       environments:
         - environment_key: qc_lakehouse_env
@@ -162,13 +248,22 @@ resources:
               - ./dist/*.whl
               - python-dotenv
 
-    vacuum_fct_orders:
-      name: vacuum_fct_orders
+    vacuum_gold_table:
+      name: vacuum_gold_table
+      # Deliberate design choice, not an accidental default: the DAG's dynamic task mapping
+      # fires up to 7 concurrent run-now calls against this one job (one per gold table).
+      # max_concurrent_runs: 1 plus queueing serializes them Databricks-side - required
+      # because Free Edition caps concurrent job tasks at 5 account-wide, and a quota overrun
+      # shuts down all workspace compute for the day. Without queue.enabled, runs above the
+      # limit are SKIPPED instead of queued, and the operator fails them.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
       tasks:
         - task_key: main
           spark_python_task:
             python_file: ./perf_lab/run_maintenance.py
-            parameters: ["--operation", "vacuum"]
+            parameters: ["--operation", "vacuum", "--table", "fct_orders"]
           environment_key: qc_lakehouse_env
       environments:
         - environment_key: qc_lakehouse_env
